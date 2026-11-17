@@ -1,0 +1,164 @@
+package workflow
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	RuntimePython = "python"
+	RuntimeJS     = "js"
+)
+
+// Workflow represents a parsed YAML pipeline definition.
+type Workflow struct {
+	Name  string `yaml:"name"`
+	Tasks []Task `yaml:"tasks"`
+}
+
+// Task represents a single unit of execution within a workflow.
+type Task struct {
+	ID        string            `yaml:"id"`
+	Runtime   string            `yaml:"runtime"`
+	DependsOn []string          `yaml:"depends_on,omitempty"`
+	Env       map[string]string `yaml:"env,omitempty"`
+	Script    string            `yaml:"script"`
+}
+
+// ParseFile reads and validates a workflow YAML file from disk.
+func ParseFile(path string) (*Workflow, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read workflow file %q: %w", path, err)
+	}
+	return Parse(data)
+}
+
+// Parse unmarshals YAML bytes into a Workflow and validates its structure and DAG.
+func Parse(data []byte) (*Workflow, error) {
+	var wf Workflow
+	if err := yaml.Unmarshal(data, &wf); err != nil {
+		return nil, fmt.Errorf("parse workflow YAML: %w", err)
+	}
+	if err := wf.Validate(); err != nil {
+		return nil, err
+	}
+	return &wf, nil
+}
+
+// Validate checks workflow fields, task definitions, references, and dependency cycles.
+func (w *Workflow) Validate() error {
+	if strings.TrimSpace(w.Name) == "" {
+		return fmt.Errorf("workflow name must not be empty")
+	}
+	if len(w.Tasks) == 0 {
+		return fmt.Errorf("workflow %q must define at least one task", w.Name)
+	}
+
+	taskByID := make(map[string]Task, len(w.Tasks))
+	for i, t := range w.Tasks {
+		if err := validateTaskID(t.ID); err != nil {
+			return fmt.Errorf("task at index %d: %w", i, err)
+		}
+		if _, exists := taskByID[t.ID]; exists {
+			return fmt.Errorf("duplicate task id %q", t.ID)
+		}
+		if t.Runtime != RuntimePython && t.Runtime != RuntimeJS {
+			return fmt.Errorf("task %q has unsupported runtime %q (supported: %q, %q)", t.ID, t.Runtime, RuntimePython, RuntimeJS)
+		}
+		if strings.TrimSpace(t.Script) == "" {
+			return fmt.Errorf("task %q script must not be empty", t.ID)
+		}
+		taskByID[t.ID] = t
+	}
+
+	for _, t := range w.Tasks {
+		for _, dep := range t.DependsOn {
+			if dep == t.ID {
+				return fmt.Errorf("task %q cannot depend on itself", t.ID)
+			}
+			if _, ok := taskByID[dep]; !ok {
+				return fmt.Errorf("task %q depends on unknown task %q", t.ID, dep)
+			}
+		}
+	}
+
+	if _, err := w.TopologicalOrder(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// TopologicalOrder returns tasks ordered such that every dependency runs before its dependents.
+// It returns an error if a cycle exists in the dependency graph.
+func (w *Workflow) TopologicalOrder() ([]Task, error) {
+	taskByID := make(map[string]Task, len(w.Tasks))
+	inDegree := make(map[string]int, len(w.Tasks))
+	dependents := make(map[string][]string, len(w.Tasks))
+
+	for _, t := range w.Tasks {
+		taskByID[t.ID] = t
+		inDegree[t.ID] = 0
+	}
+
+	for _, t := range w.Tasks {
+		seenDeps := make(map[string]struct{}, len(t.DependsOn))
+		for _, dep := range t.DependsOn {
+			if _, dup := seenDeps[dep]; dup {
+				continue
+			}
+			seenDeps[dep] = struct{}{}
+			inDegree[t.ID]++
+			dependents[dep] = append(dependents[dep], t.ID)
+		}
+	}
+
+	queue := make([]string, 0, len(w.Tasks))
+	for _, t := range w.Tasks {
+		if inDegree[t.ID] == 0 {
+			queue = append(queue, t.ID)
+		}
+	}
+
+	ordered := make([]Task, 0, len(w.Tasks))
+	for len(queue) > 0 {
+		currID := queue[0]
+		queue = queue[1:]
+		ordered = append(ordered, taskByID[currID])
+
+		for _, nextID := range dependents[currID] {
+			inDegree[nextID]--
+			if inDegree[nextID] == 0 {
+				queue = append(queue, nextID)
+			}
+		}
+	}
+
+	if len(ordered) != len(w.Tasks) {
+		var cyclic []string
+		for _, t := range w.Tasks {
+			if inDegree[t.ID] > 0 {
+				cyclic = append(cyclic, t.ID)
+			}
+		}
+		return nil, fmt.Errorf("dependency cycle detected involving tasks: %s", strings.Join(cyclic, ", "))
+	}
+
+	return ordered, nil
+}
+
+func validateTaskID(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("task id must not be empty")
+	}
+	if id == "." || id == ".." {
+		return fmt.Errorf("invalid task id %q", id)
+	}
+	if strings.ContainsAny(id, "/\\ \t\r\n") {
+		return fmt.Errorf("task id %q must not contain whitespace or path separators", id)
+	}
+	return nil
+}

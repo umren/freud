@@ -1,0 +1,29 @@
+# Compiled binaries and build artifacts
+/orchestrator
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+
+# Runtime SQLite databases and WAL files
+orchestrator.db
+orchestrator.db-wal
+orchestrator.db-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Runtime task workspaces
+/workspaces/
+
+# Environment and OS/editor files
+.env
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/

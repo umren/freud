@@ -1,0 +1,39 @@
+name: etl-example
+tasks:
+  - id: extract
+    runtime: python
+    env:
+      SOURCE_LABEL: "sensor-batch-01"
+    script: |
+      import json
+      import os
+
+      payload = {
+          "message": "Hello from Python extract task",
+          "source": os.environ.get("SOURCE_LABEL", "default"),
+          "numbers": [10, 20, 30, 42],
+      }
+
+      output_path = "/workspace/payload.json"
+      with open(output_path, "w", encoding="utf-8") as f:
+          json.dump(payload, f, indent=2)
+
+      print(f"Wrote payload to {output_path}")
+
+  - id: transform
+    runtime: js
+    depends_on:
+      - extract
+    script: |
+      import { readFileSync } from "fs";
+
+      const raw = readFileSync("/workspace/payload.json", "utf-8");
+      const data = JSON.parse(raw);
+
+      const numbers: number[] = Array.isArray(data.numbers) ? data.numbers : [];
+      const sum = numbers.reduce((acc, n) => acc + n, 0);
+
+      console.log(`Message: ${data.message}`);
+      console.log(`Source: ${data.source}`);
+      console.log(`Numbers: ${JSON.stringify(numbers)}`);
+      console.log(`Sum: ${sum}`);
