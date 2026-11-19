@@ -77,8 +77,8 @@ You can interrupt a running workflow with `Ctrl+C` (`SIGINT`/`SIGTERM`), which c
 
 The included [`example.yaml`](example.yaml) demonstrates file-based data exchange between two runtimes:
 
-1. **`extract`** (`runtime: python`, `image: python:3.13-slim`): reads `SOURCE_LABEL` from `env` and writes `/workspace/payload.json` containing a message and a list of numbers (`[10, 20, 30, 42]`).
-2. **`transform`** (`runtime: js`, `depends_on: [extract]`): reads `/workspace/payload.json`, computes the sum (`102`), and prints the result to stdout.
+1. **`extract`** (`runtime: python`, `image: python:3.13-slim`, `dependencies: [pydantic, pyyaml]`): installs `pydantic` and `pyyaml`, reads variables from `.env`, validates the payload with `pydantic`, prints a YAML summary, and writes `/workspace/payload.json`.
+2. **`transform`** (`runtime: js`, `depends_on: [extract]`, `dependencies: [lodash-es, ms]`): installs `lodash-es` and `ms`, reads `/workspace/payload.json`, computes the sum (`102`) with `lodash-es`, and prints the `.env` variables and result to stdout.
 
 ## Workflow YAML Specification
 
@@ -88,6 +88,9 @@ tasks:
   - id: step_one
     runtime: python           # "python", "js", or "shell" (optional if image is set)
     image: python:3.13-slim   # optional Docker image override (Kestra-style)
+    dependencies:             # optional packages installed in the task container
+      - pydantic
+      - pyyaml
     env:                      # optional key-value environment variables
       MY_VAR: "value"
     script: |
@@ -97,6 +100,8 @@ tasks:
     runtime: js
     depends_on:               # optional list of upstream task IDs
       - step_one
+    dependencies:
+      - lodash-es
     script: |
       console.log("Hello from Bun");
 
@@ -115,6 +120,7 @@ tasks:
 - Each task `id` must be unique, non-empty, and must not contain whitespace, `/`, `\`, `.` or `..`.
 - `runtime` must be `"python"`, `"js"`, or `"shell"` (if omitted, `image` must be set and `runtime` defaults to `"shell"`).
 - `image` is optional for `python` and `js`, required for `shell`, and must not contain whitespace.
+- `dependencies` is optional for `python` and `js` (not supported on `shell`); entries must be non-empty.
 - `script` must be non-empty.
 - Every entry in `depends_on` must reference an existing task `id`, cannot reference itself, and the resulting graph must be acyclic.
 

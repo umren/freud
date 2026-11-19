@@ -93,6 +93,16 @@ func TestParseValidationErrors(t *testing.T) {
 			wantErr: "must not contain whitespace",
 		},
 		{
+			name:    "shell runtime with dependencies",
+			yaml:    "name: shell-deps\ntasks:\n  - id: a\n    runtime: shell\n    image: alpine:3.20\n    dependencies: [curl]\n    script: echo 1\n",
+			wantErr: "does not support dependencies",
+		},
+		{
+			name:    "empty dependency entry",
+			yaml:    "name: empty-dep\ntasks:\n  - id: a\n    runtime: python\n    dependencies: [\"   \"]\n    script: print(1)\n",
+			wantErr: "dependency at index 0 is invalid",
+		},
+		{
 			name: "cycle detection",
 			yaml: `name: cycle
 tasks:

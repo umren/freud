@@ -22,12 +22,13 @@ type Workflow struct {
 
 // Task represents a single unit of execution within a workflow.
 type Task struct {
-	ID        string            `yaml:"id"`
-	Runtime   string            `yaml:"runtime,omitempty"`
-	Image     string            `yaml:"image,omitempty"`
-	DependsOn []string          `yaml:"depends_on,omitempty"`
-	Env       map[string]string `yaml:"env,omitempty"`
-	Script    string            `yaml:"script"`
+	ID           string            `yaml:"id"`
+	Runtime      string            `yaml:"runtime,omitempty"`
+	Image        string            `yaml:"image,omitempty"`
+	Dependencies []string          `yaml:"dependencies,omitempty"`
+	DependsOn    []string          `yaml:"depends_on,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
+	Script       string            `yaml:"script"`
 }
 
 // ParseFile reads and validates a workflow YAML file from disk.
@@ -88,11 +89,22 @@ func (w *Workflow) Validate() error {
 			if t.Image == "" {
 				return fmt.Errorf("task %q with runtime %q must specify an image", t.ID, t.Runtime)
 			}
+			if len(t.Dependencies) > 0 {
+				return fmt.Errorf("task %q with runtime %q does not support dependencies", t.ID, t.Runtime)
+			}
 		default:
 			return fmt.Errorf(
 				"task %q has unsupported runtime %q (supported: %q, %q, %q)",
 				t.ID, t.Runtime, RuntimePython, RuntimeJS, RuntimeShell,
 			)
+		}
+
+		for j, pkg := range t.Dependencies {
+			trimmed := strings.TrimSpace(pkg)
+			if trimmed == "" || strings.ContainsAny(trimmed, "\r\n") {
+				return fmt.Errorf("task %q dependency at index %d is invalid", t.ID, j)
+			}
+			t.Dependencies[j] = trimmed
 		}
 
 		if strings.TrimSpace(t.Script) == "" {

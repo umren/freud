@@ -86,4 +86,56 @@ func TestResolveRuntimeSpec(t *testing.T) {
 			t.Fatalf("unexpected command: %v", cmd)
 		}
 	})
+
+	t.Run("python default image with dependencies", func(t *testing.T) {
+		spec, err := resolveRuntimeSpec(workflow.Task{
+			ID:           "t4",
+			Runtime:      workflow.RuntimePython,
+			Dependencies: []string{"pydantic", "pyyaml"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		cmd := spec.Command("/workspace/.scripts/t4.py")
+		want := []string{"uv", "run", "--with", "pydantic", "--with", "pyyaml", "/workspace/.scripts/t4.py"}
+		if len(cmd) != len(want) {
+			t.Fatalf("unexpected command: %v", cmd)
+		}
+		for i := range want {
+			if cmd[i] != want[i] {
+				t.Fatalf("cmd[%d]: expected %q, got %q", i, want[i], cmd[i])
+			}
+		}
+	})
+
+	t.Run("python custom image with dependencies", func(t *testing.T) {
+		spec, err := resolveRuntimeSpec(workflow.Task{
+			ID:           "t5",
+			Runtime:      workflow.RuntimePython,
+			Image:        "python:3.13-slim",
+			Dependencies: []string{"pydantic", "pyyaml"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		cmd := spec.Command("/workspace/.scripts/t5.py")
+		if len(cmd) != 7 || cmd[0] != "sh" || cmd[1] != "-c" || cmd[4] != "/workspace/.scripts/t5.py" || cmd[5] != "pydantic" || cmd[6] != "pyyaml" {
+			t.Fatalf("unexpected command: %v", cmd)
+		}
+	})
+
+	t.Run("js default image with dependencies", func(t *testing.T) {
+		spec, err := resolveRuntimeSpec(workflow.Task{
+			ID:           "t6",
+			Runtime:      workflow.RuntimeJS,
+			Dependencies: []string{"lodash-es", "ms"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		cmd := spec.Command("/workspace/.scripts/t6.ts")
+		if len(cmd) != 7 || cmd[0] != "sh" || cmd[1] != "-c" || cmd[4] != "/workspace/.scripts/t6.ts" || cmd[5] != "lodash-es" || cmd[6] != "ms" {
+			t.Fatalf("unexpected command: %v", cmd)
+		}
+	})
 }

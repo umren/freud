@@ -42,7 +42,32 @@ type RuntimeSpec struct {
 	Command   func(containerScriptPath string) []string
 }
 
+const (
+	pythonWithDepsScript = `script="$1"
+shift
+if command -v uv >/dev/null 2>&1; then
+	uv venv /tmp/.venv >/dev/null 2>&1 && uv pip install --python /tmp/.venv/bin/python "$@" && exec /tmp/.venv/bin/python "$script"
+elif command -v python3 >/dev/null 2>&1; then
+	PIP_ROOT_USER_ACTION=ignore python3 -m pip install --no-cache-dir --disable-pip-version-check "$@" && exec python3 "$script"
+else
+	PIP_ROOT_USER_ACTION=ignore python -m pip install --no-cache-dir --disable-pip-version-check "$@" && exec python "$script"
+fi`
+
+	jsWithDepsScript = `script="$1"
+shift
+if command -v bun >/dev/null 2>&1; then
+	mkdir -p /tmp/deps && (cd /tmp/deps && bun add "$@") && NODE_PATH="/tmp/deps/node_modules${NODE_PATH:+:$NODE_PATH}" exec bun run "$script"
+elif command -v npm >/dev/null 2>&1; then
+	mkdir -p /tmp/deps && npm install --prefix /tmp/deps --no-save "$@" && NODE_PATH="/tmp/deps/node_modules${NODE_PATH:+:$NODE_PATH}" exec node "$script"
+else
+	echo "No supported JS package manager (bun or npm) found in image" >&2
+	exit 1
+fi`
+)
+
 func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
+	deps := task.Dependencies
+
 	switch task.Runtime {
 	case workflow.RuntimePython:
 		img := task.Image
@@ -51,7 +76,16 @@ func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
 				Image:     defaultPythonImage,
 				Extension: ".py",
 				Command: func(scriptPath string) []string {
-					return []string{"uv", "run", scriptPath}
+					if len(deps) == 0 {
+						return []string{"uv", "run", scriptPath}
+					}
+					cmd := make([]string, 0, 3+len(deps)*2)
+					cmd = append(cmd, "uv", "run")
+					for _, dep := range deps {
+						cmd = append(cmd, "--with", dep)
+					}
+					cmd = append(cmd, scriptPath)
+					return cmd
 				},
 			}, nil
 		}
@@ -59,11 +93,17 @@ func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
 			Image:     img,
 			Extension: ".py",
 			Command: func(scriptPath string) []string {
-				return []string{
-					"sh", "-c",
-					`if command -v uv >/dev/null 2>&1; then exec uv run "$1"; elif command -v python3 >/dev/null 2>&1; then exec python3 "$1"; else exec python "$1"; fi`,
-					"sh", scriptPath,
+				if len(deps) == 0 {
+					return []string{
+						"sh", "-c",
+						`if command -v uv >/dev/null 2>&1; then exec uv run "$1"; elif command -v python3 >/dev/null 2>&1; then exec python3 "$1"; else exec python "$1"; fi`,
+						"sh", scriptPath,
+					}
 				}
+				cmd := make([]string, 0, 5+len(deps))
+				cmd = append(cmd, "sh", "-c", pythonWithDepsScript, "sh", scriptPath)
+				cmd = append(cmd, deps...)
+				return cmd
 			},
 		}, nil
 
@@ -74,7 +114,13 @@ func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
 				Image:     defaultJSImage,
 				Extension: ".ts",
 				Command: func(scriptPath string) []string {
-					return []string{"bun", "run", scriptPath}
+					if len(deps) == 0 {
+						return []string{"bun", "run", scriptPath}
+					}
+					cmd := make([]string, 0, 5+len(deps))
+					cmd = append(cmd, "sh", "-c", jsWithDepsScript, "sh", scriptPath)
+					cmd = append(cmd, deps...)
+					return cmd
 				},
 			}, nil
 		}
@@ -82,17 +128,26 @@ func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
 			Image:     img,
 			Extension: ".ts",
 			Command: func(scriptPath string) []string {
-				return []string{
-					"sh", "-c",
-					`if command -v bun >/dev/null 2>&1; then exec bun run "$1"; elif command -v deno >/dev/null 2>&1; then exec deno run --allow-all "$1"; else exec node "$1"; fi`,
-					"sh", scriptPath,
+				if len(deps) == 0 {
+					return []string{
+						"sh", "-c",
+						`if command -v bun >/dev/null 2>&1; then exec bun run "$1"; elif command -v deno >/dev/null 2>&1; then exec deno run --allow-all "$1"; else exec node "$1"; fi`,
+						"sh", scriptPath,
+					}
 				}
+				cmd := make([]string, 0, 5+len(deps))
+				cmd = append(cmd, "sh", "-c", jsWithDepsScript, "sh", scriptPath)
+				cmd = append(cmd, deps...)
+				return cmd
 			},
 		}, nil
 
 	case workflow.RuntimeShell, "":
 		if task.Image == "" {
 			return RuntimeSpec{}, fmt.Errorf("task %q with runtime %q requires an image", task.ID, task.Runtime)
+		}
+		if len(deps) > 0 {
+			return RuntimeSpec{}, fmt.Errorf("task %q with runtime %q does not support dependencies", task.ID, task.Runtime)
 		}
 		return RuntimeSpec{
 			Image:     task.Image,
