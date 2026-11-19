@@ -2,15 +2,27 @@ name: etl-example
 tasks:
   - id: extract
     runtime: python
+    image: python:3.13-slim
     env:
-      SOURCE_LABEL: "sensor-batch-01"
+      TASK_AUTH: "Bearer ${API_TOKEN}"
     script: |
       import json
       import os
 
+      pipeline_env = os.environ.get("PIPELINE_ENV", "unknown")
+      source_label = os.environ.get("SOURCE_LABEL", "default")
+      api_token = os.environ.get("API_TOKEN", "")
+      task_auth = os.environ.get("TASK_AUTH", "")
+
+      print(f"[extract] PIPELINE_ENV={pipeline_env}")
+      print(f"[extract] SOURCE_LABEL={source_label}")
+      print(f"[extract] API_TOKEN={api_token}")
+      print(f"[extract] TASK_AUTH={task_auth}")
+
       payload = {
           "message": "Hello from Python extract task",
-          "source": os.environ.get("SOURCE_LABEL", "default"),
+          "env": pipeline_env,
+          "source": source_label,
           "numbers": [10, 20, 30, 42],
       }
 
@@ -33,6 +45,9 @@ tasks:
       const numbers: number[] = Array.isArray(data.numbers) ? data.numbers : [];
       const sum = numbers.reduce((acc, n) => acc + n, 0);
 
+      console.log(`[transform] PIPELINE_ENV=${process.env.PIPELINE_ENV ?? "unknown"}`);
+      console.log(`[transform] SOURCE_LABEL=${process.env.SOURCE_LABEL ?? "default"}`);
+      console.log(`[transform] API_TOKEN=${process.env.API_TOKEN ?? ""}`);
       console.log(`Message: ${data.message}`);
       console.log(`Source: ${data.source}`);
       console.log(`Numbers: ${JSON.stringify(numbers)}`);

@@ -11,6 +11,7 @@ import (
 const (
 	RuntimePython = "python"
 	RuntimeJS     = "js"
+	RuntimeShell  = "shell"
 )
 
 // Workflow represents a parsed YAML pipeline definition.
@@ -22,7 +23,8 @@ type Workflow struct {
 // Task represents a single unit of execution within a workflow.
 type Task struct {
 	ID        string            `yaml:"id"`
-	Runtime   string            `yaml:"runtime"`
+	Runtime   string            `yaml:"runtime,omitempty"`
+	Image     string            `yaml:"image,omitempty"`
 	DependsOn []string          `yaml:"depends_on,omitempty"`
 	Env       map[string]string `yaml:"env,omitempty"`
 	Script    string            `yaml:"script"`
@@ -59,20 +61,44 @@ func (w *Workflow) Validate() error {
 	}
 
 	taskByID := make(map[string]Task, len(w.Tasks))
-	for i, t := range w.Tasks {
+	for i := range w.Tasks {
+		t := &w.Tasks[i]
 		if err := validateTaskID(t.ID); err != nil {
 			return fmt.Errorf("task at index %d: %w", i, err)
 		}
 		if _, exists := taskByID[t.ID]; exists {
 			return fmt.Errorf("duplicate task id %q", t.ID)
 		}
-		if t.Runtime != RuntimePython && t.Runtime != RuntimeJS {
-			return fmt.Errorf("task %q has unsupported runtime %q (supported: %q, %q)", t.ID, t.Runtime, RuntimePython, RuntimeJS)
+
+		t.Image = strings.TrimSpace(t.Image)
+		if strings.ContainsAny(t.Image, " \t\r\n") {
+			return fmt.Errorf("task %q image %q must not contain whitespace", t.ID, t.Image)
 		}
+
+		if t.Runtime == "" {
+			if t.Image == "" {
+				return fmt.Errorf("task %q must specify either runtime or image", t.ID)
+			}
+			t.Runtime = RuntimeShell
+		}
+
+		switch t.Runtime {
+		case RuntimePython, RuntimeJS:
+		case RuntimeShell:
+			if t.Image == "" {
+				return fmt.Errorf("task %q with runtime %q must specify an image", t.ID, t.Runtime)
+			}
+		default:
+			return fmt.Errorf(
+				"task %q has unsupported runtime %q (supported: %q, %q, %q)",
+				t.ID, t.Runtime, RuntimePython, RuntimeJS, RuntimeShell,
+			)
+		}
+
 		if strings.TrimSpace(t.Script) == "" {
 			return fmt.Errorf("task %q script must not be empty", t.ID)
 		}
-		taskByID[t.ID] = t
+		taskByID[t.ID] = *t
 	}
 
 	for _, t := range w.Tasks {

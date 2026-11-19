@@ -6,9 +6,10 @@ A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype
 
 - **Pure-Go stack (no CGO required)**: builds cleanly with `CGO_ENABLED=0`.
 - **YAML DAG workflows**: defines tasks, environment variables, inline scripts, and `depends_on` edges with cycle and reference validation.
-- **Dockerized runtimes**:
-  - `python` via `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` (`uv run`)
-  - `js` via `oven/bun:latest` (`bun run`)
+- **Dockerized runtimes with custom images**:
+  - `python` (default `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`, or any custom image such as `python:3.13-slim`)
+  - `js` (default `oven/bun:latest`, or any custom image such as `oven/bun:1.2`, `node:22-alpine`)
+  - `shell` (or omit `runtime` when `image` is specified, e.g. `alpine:3.20`)
 - **Automatic image pulling**: checks local Docker images and pulls missing ones while streaming pull progress to the console.
 - **Shared per-run workspace**: creates `./workspaces/<run_id>` on the host and mounts it at `/workspace` inside every task container.
 - **Reliable log & status capture**: disables `AutoRemove`, waits for container completion, demultiplexes stdout/stderr, prints output, stores logs and exit codes in SQLite, and then removes the container.
@@ -30,6 +31,7 @@ A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype
 ├── go.sum
 └── internal/
     ├── workflow/           # YAML parsing, validation, cycle detection, topological sort
+    ├── env/                # .env file loader and task environment merging
     ├── db/                 # SQLite initialization, WAL pragmas, migrations, state queries
     ├── runner/             # Docker SDK execution, image pull, log capture, cleanup
     └── engine/             # Pipeline orchestration and workspace lifecycle
@@ -56,13 +58,26 @@ Run a workflow YAML file:
 ./orchestrator run example.yaml
 ```
 
+Optionally pass a custom `.env` file:
+
+```bash
+./orchestrator run --env-file .env.prod example.yaml
+```
+
+### Environment Variables (`.env`)
+
+- When `--env-file` is omitted, the orchestrator automatically loads `.env` from the workflow's directory and/or the current working directory (current working directory takes precedence if both exist).
+- All variables from `.env` are injected into every task container (`os.environ` in Python, `process.env` in JS/Bun, `$VAR` in shell).
+- Task-level `env:` entries in YAML override `.env` variables on key collision and can reference `.env` variables via `${VAR}` syntax (for example `AUTH_TOKEN: "${API_KEY}"`).
+- Host environment variables are not forwarded automatically, and `.env` values are never printed to orchestrator logs.
+
 You can interrupt a running workflow with `Ctrl+C` (`SIGINT`/`SIGTERM`), which cancels execution and records the active task and run as `FAILED`.
 
 ### Example (`example.yaml`)
 
 The included [`example.yaml`](example.yaml) demonstrates file-based data exchange between two runtimes:
 
-1. **`extract`** (`runtime: python`): reads `SOURCE_LABEL` from `env` and writes `/workspace/payload.json` containing a message and a list of numbers (`[10, 20, 30, 42]`).
+1. **`extract`** (`runtime: python`, `image: python:3.13-slim`): reads `SOURCE_LABEL` from `env` and writes `/workspace/payload.json` containing a message and a list of numbers (`[10, 20, 30, 42]`).
 2. **`transform`** (`runtime: js`, `depends_on: [extract]`): reads `/workspace/payload.json`, computes the sum (`102`), and prints the result to stdout.
 
 ## Workflow YAML Specification
@@ -71,11 +86,12 @@ The included [`example.yaml`](example.yaml) demonstrates file-based data exchang
 name: my-pipeline
 tasks:
   - id: step_one
-    runtime: python           # "python" or "js"
+    runtime: python           # "python", "js", or "shell" (optional if image is set)
+    image: python:3.13-slim   # optional Docker image override (Kestra-style)
     env:                      # optional key-value environment variables
       MY_VAR: "value"
     script: |
-      print("Hello from Python")
+      print("Hello from Python 3.13")
 
   - id: step_two
     runtime: js
@@ -83,6 +99,13 @@ tasks:
       - step_one
     script: |
       console.log("Hello from Bun");
+
+  - id: step_three
+    image: alpine:3.20        # runtime defaults to "shell" when omitted
+    depends_on:
+      - step_two
+    script: |
+      ls -la /workspace
 ```
 
 ### Validation Rules
@@ -90,7 +113,8 @@ tasks:
 - `name` must be non-empty.
 - `tasks` must contain at least one task.
 - Each task `id` must be unique, non-empty, and must not contain whitespace, `/`, `\`, `.` or `..`.
-- `runtime` must be `"python"` or `"js"`.
+- `runtime` must be `"python"`, `"js"`, or `"shell"` (if omitted, `image` must be set and `runtime` defaults to `"shell"`).
+- `image` is optional for `python` and `js`, required for `shell`, and must not contain whitespace.
 - `script` must be non-empty.
 - Every entry in `depends_on` must reference an existing task `id`, cannot reference itself, and the resulting graph must be acyclic.
 
@@ -99,9 +123,9 @@ tasks:
 1. **Workspace setup**: generates a unique `run_id` (`YYYYMMDD-HHMMSS-<hex>`) and creates `./workspaces/<run_id>/.scripts` on the host.
 2. **Topological ordering**: resolves task order via Kahn's algorithm so every dependency finishes before its dependents start.
 3. **Container run**:
-   - Writes the task script to `./workspaces/<run_id>/.scripts/<task_id>.py` (for `python`) or `.ts` (for `js`).
+   - Writes the task script to `./workspaces/<run_id>/.scripts/<task_id>.py` (`python`), `.ts` (`js`), or `.sh` (`shell`).
    - Mounts `./workspaces/<run_id>` as `/workspace` (`WorkingDir: /workspace`).
-   - Runs `["uv", "run", "/workspace/.scripts/<task_id>.py"]` or `["bun", "run", "/workspace/.scripts/<task_id>.ts"]`.
+   - Uses the task's `image` (or runtime default if omitted) and executes the script with the available runtime binary (`uv` / `python3` / `python` for Python, `bun` / `deno` / `node` for JS, `sh` for shell).
    - Waits for exit (`ContainerWait`), captures stdout/stderr (`ContainerLogs`), writes logs to console and SQLite, and removes the container (`ContainerRemove`).
 
 ## SQLite Database (`orchestrator.db`)

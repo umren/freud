@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	pythonImage = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
-	jsImage     = "oven/bun:latest"
+	defaultPythonImage = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+	defaultJSImage     = "oven/bun:latest"
 
 	containerWorkspaceDir = "/workspace"
 	scriptsSubdir         = ".scripts"
@@ -35,28 +35,76 @@ type Result struct {
 	Logs     string
 }
 
-// RuntimeSpec defines the image, script extension, and command for a task runtime.
+// RuntimeSpec defines the image, script extension, and command for a task execution.
 type RuntimeSpec struct {
 	Image     string
 	Extension string
 	Command   func(containerScriptPath string) []string
 }
 
-var runtimeSpecs = map[string]RuntimeSpec{
-	workflow.RuntimePython: {
-		Image:     pythonImage,
-		Extension: ".py",
-		Command: func(scriptPath string) []string {
-			return []string{"uv", "run", scriptPath}
-		},
-	},
-	workflow.RuntimeJS: {
-		Image:     jsImage,
-		Extension: ".ts",
-		Command: func(scriptPath string) []string {
-			return []string{"bun", "run", scriptPath}
-		},
-	},
+func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
+	switch task.Runtime {
+	case workflow.RuntimePython:
+		img := task.Image
+		if img == "" {
+			return RuntimeSpec{
+				Image:     defaultPythonImage,
+				Extension: ".py",
+				Command: func(scriptPath string) []string {
+					return []string{"uv", "run", scriptPath}
+				},
+			}, nil
+		}
+		return RuntimeSpec{
+			Image:     img,
+			Extension: ".py",
+			Command: func(scriptPath string) []string {
+				return []string{
+					"sh", "-c",
+					`if command -v uv >/dev/null 2>&1; then exec uv run "$1"; elif command -v python3 >/dev/null 2>&1; then exec python3 "$1"; else exec python "$1"; fi`,
+					"sh", scriptPath,
+				}
+			},
+		}, nil
+
+	case workflow.RuntimeJS:
+		img := task.Image
+		if img == "" {
+			return RuntimeSpec{
+				Image:     defaultJSImage,
+				Extension: ".ts",
+				Command: func(scriptPath string) []string {
+					return []string{"bun", "run", scriptPath}
+				},
+			}, nil
+		}
+		return RuntimeSpec{
+			Image:     img,
+			Extension: ".ts",
+			Command: func(scriptPath string) []string {
+				return []string{
+					"sh", "-c",
+					`if command -v bun >/dev/null 2>&1; then exec bun run "$1"; elif command -v deno >/dev/null 2>&1; then exec deno run --allow-all "$1"; else exec node "$1"; fi`,
+					"sh", scriptPath,
+				}
+			},
+		}, nil
+
+	case workflow.RuntimeShell, "":
+		if task.Image == "" {
+			return RuntimeSpec{}, fmt.Errorf("task %q with runtime %q requires an image", task.ID, task.Runtime)
+		}
+		return RuntimeSpec{
+			Image:     task.Image,
+			Extension: ".sh",
+			Command: func(scriptPath string) []string {
+				return []string{"sh", scriptPath}
+			},
+		}, nil
+
+	default:
+		return RuntimeSpec{}, fmt.Errorf("unsupported runtime %q for task %q", task.Runtime, task.ID)
+	}
 }
 
 // DockerRunner executes workflow tasks inside ephemeral Docker containers.
@@ -84,9 +132,9 @@ func (r *DockerRunner) Close() error {
 // RunTask writes the task script to the shared workspace, ensures the runtime image exists,
 // executes the container, captures logs, and removes the container afterward.
 func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string, task workflow.Task) (*Result, error) {
-	spec, ok := runtimeSpecs[task.Runtime]
-	if !ok {
-		return nil, fmt.Errorf("unsupported runtime %q for task %q", task.Runtime, task.ID)
+	spec, err := resolveRuntimeSpec(task)
+	if err != nil {
+		return nil, err
 	}
 
 	absWorkspace, err := filepath.Abs(hostWorkspace)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"freud/internal/db"
+	"freud/internal/env"
 	"freud/internal/runner"
 	"freud/internal/workflow"
 )
@@ -29,6 +30,7 @@ type Engine struct {
 	store          *db.Store
 	runner         TaskRunner
 	workspacesBase string
+	baseEnv        map[string]string
 }
 
 // New creates a workflow execution Engine.
@@ -41,6 +43,11 @@ func New(store *db.Store, taskRunner TaskRunner, workspacesBase string) *Engine 
 		runner:         taskRunner,
 		workspacesBase: workspacesBase,
 	}
+}
+
+// SetEnv sets base environment variables (such as those loaded from .env) injected into every task.
+func (e *Engine) SetEnv(baseEnv map[string]string) {
+	e.baseEnv = baseEnv
 }
 
 // Run executes all tasks in the workflow in topological order and persists run metadata to SQLite.
@@ -68,7 +75,11 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 	fmt.Printf("[engine] Starting workflow %q (run_id=%s, workspace=%s)\n", wf.Name, runID, hostWorkspace)
 
 	for _, task := range orderedTasks {
-		fmt.Printf("[engine] Running task %q (runtime=%s)\n", task.ID, task.Runtime)
+		if task.Image != "" {
+			fmt.Printf("[engine] Running task %q (runtime=%s, image=%s)\n", task.ID, task.Runtime, task.Image)
+		} else {
+			fmt.Printf("[engine] Running task %q (runtime=%s)\n", task.ID, task.Runtime)
+		}
 
 		taskRunID, err := e.store.CreateTaskRun(ctx, runID, task.ID)
 		if err != nil {
@@ -76,7 +87,10 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 			return runID, fmt.Errorf("record task %q start: %w", task.ID, err)
 		}
 
-		res, runErr := e.runner.RunTask(ctx, runID, hostWorkspace, task)
+		execTask := task
+		execTask.Env = env.MergeTaskEnv(e.baseEnv, task.Env)
+
+		res, runErr := e.runner.RunTask(ctx, runID, hostWorkspace, execTask)
 
 		var exitCode int64 = -1
 		var logs string
