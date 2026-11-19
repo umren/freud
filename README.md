@@ -10,7 +10,7 @@ A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype
   - `python` (default `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`, or any custom image such as `python:3.13-slim`)
   - `js` (default `oven/bun:latest`, or any custom image such as `oven/bun:1.2`, `node:22-alpine`)
   - `shell` (or omit `runtime` when `image` is specified, e.g. `alpine:3.20`)
-- **Automatic image pulling**: checks local Docker images and pulls missing ones while streaming pull progress to the console.
+- **Automatic image pulling & dependency caching**: checks local Docker images, pulls missing ones with live progress, and builds cached Docker image layers (`orchestrator-cache:<hash>`) for tasks with `dependencies` so subsequent runs start immediately without reinstalling packages.
 - **Shared per-run workspace**: creates `./workspaces/<run_id>` on the host and mounts it at `/workspace` inside every task container.
 - **Reliable log & status capture**: disables `AutoRemove`, waits for container completion, demultiplexes stdout/stderr, prints output, stores logs and exit codes in SQLite, and then removes the container.
 - **Fail-fast execution**: stops the pipeline immediately if a task exits with a non-zero status, marking both the task and the workflow run as `FAILED`.
@@ -58,10 +58,18 @@ Run a workflow YAML file:
 ./orchestrator run example.yaml
 ```
 
-Optionally pass a custom `.env` file:
+Optionally pass a custom `.env` file or force-rebuild cached dependency images:
 
 ```bash
 ./orchestrator run --env-file .env.prod example.yaml
+./orchestrator run --no-cache example.yaml
+```
+
+Manage cached dependency images:
+
+```bash
+./orchestrator cache ls
+./orchestrator cache clear
 ```
 
 ### Environment Variables (`.env`)

@@ -35,110 +35,57 @@ type Result struct {
 	Logs     string
 }
 
-// RuntimeSpec defines the image, script extension, and command for a task execution.
+// RuntimeSpec defines the base image, script extension, and container command for a task execution.
 type RuntimeSpec struct {
 	Image     string
 	Extension string
 	Command   func(containerScriptPath string) []string
 }
 
-const (
-	pythonWithDepsScript = `script="$1"
-shift
-if command -v uv >/dev/null 2>&1; then
-	uv venv /tmp/.venv >/dev/null 2>&1 && uv pip install --python /tmp/.venv/bin/python "$@" && exec /tmp/.venv/bin/python "$script"
-elif command -v python3 >/dev/null 2>&1; then
-	PIP_ROOT_USER_ACTION=ignore python3 -m pip install --no-cache-dir --disable-pip-version-check "$@" && exec python3 "$script"
-else
-	PIP_ROOT_USER_ACTION=ignore python -m pip install --no-cache-dir --disable-pip-version-check "$@" && exec python "$script"
-fi`
-
-	jsWithDepsScript = `script="$1"
-shift
-if command -v bun >/dev/null 2>&1; then
-	mkdir -p /tmp/deps && (cd /tmp/deps && bun add "$@") && NODE_PATH="/tmp/deps/node_modules${NODE_PATH:+:$NODE_PATH}" exec bun run "$script"
-elif command -v npm >/dev/null 2>&1; then
-	mkdir -p /tmp/deps && npm install --prefix /tmp/deps --no-save "$@" && NODE_PATH="/tmp/deps/node_modules${NODE_PATH:+:$NODE_PATH}" exec node "$script"
-else
-	echo "No supported JS package manager (bun or npm) found in image" >&2
-	exit 1
-fi`
-)
-
 func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
-	deps := task.Dependencies
+	hasDeps := len(task.Dependencies) > 0
 
 	switch task.Runtime {
 	case workflow.RuntimePython:
 		img := task.Image
 		if img == "" {
-			return RuntimeSpec{
-				Image:     defaultPythonImage,
-				Extension: ".py",
-				Command: func(scriptPath string) []string {
-					if len(deps) == 0 {
-						return []string{"uv", "run", scriptPath}
-					}
-					cmd := make([]string, 0, 3+len(deps)*2)
-					cmd = append(cmd, "uv", "run")
-					for _, dep := range deps {
-						cmd = append(cmd, "--with", dep)
-					}
-					cmd = append(cmd, scriptPath)
-					return cmd
-				},
-			}, nil
+			img = defaultPythonImage
 		}
 		return RuntimeSpec{
 			Image:     img,
 			Extension: ".py",
 			Command: func(scriptPath string) []string {
-				if len(deps) == 0 {
-					return []string{
-						"sh", "-c",
-						`if command -v uv >/dev/null 2>&1; then exec uv run "$1"; elif command -v python3 >/dev/null 2>&1; then exec python3 "$1"; else exec python "$1"; fi`,
-						"sh", scriptPath,
-					}
+				if hasDeps {
+					return []string{pythonVenvPython, scriptPath}
 				}
-				cmd := make([]string, 0, 5+len(deps))
-				cmd = append(cmd, "sh", "-c", pythonWithDepsScript, "sh", scriptPath)
-				cmd = append(cmd, deps...)
-				return cmd
+				if task.Image == "" {
+					return []string{"uv", "run", scriptPath}
+				}
+				return []string{
+					"sh", "-c",
+					`if command -v uv >/dev/null 2>&1; then exec uv run "$1"; elif command -v python3 >/dev/null 2>&1; then exec python3 "$1"; else exec python "$1"; fi`,
+					"sh", scriptPath,
+				}
 			},
 		}, nil
 
 	case workflow.RuntimeJS:
 		img := task.Image
 		if img == "" {
-			return RuntimeSpec{
-				Image:     defaultJSImage,
-				Extension: ".ts",
-				Command: func(scriptPath string) []string {
-					if len(deps) == 0 {
-						return []string{"bun", "run", scriptPath}
-					}
-					cmd := make([]string, 0, 5+len(deps))
-					cmd = append(cmd, "sh", "-c", jsWithDepsScript, "sh", scriptPath)
-					cmd = append(cmd, deps...)
-					return cmd
-				},
-			}, nil
+			img = defaultJSImage
 		}
 		return RuntimeSpec{
 			Image:     img,
 			Extension: ".ts",
 			Command: func(scriptPath string) []string {
-				if len(deps) == 0 {
-					return []string{
-						"sh", "-c",
-						`if command -v bun >/dev/null 2>&1; then exec bun run "$1"; elif command -v deno >/dev/null 2>&1; then exec deno run --allow-all "$1"; else exec node "$1"; fi`,
-						"sh", scriptPath,
-					}
+				if task.Image == "" {
+					return []string{"bun", "run", scriptPath}
 				}
-				cmd := make([]string, 0, 5+len(deps))
-				cmd = append(cmd, "sh", "-c", jsWithDepsScript, "sh", scriptPath)
-				cmd = append(cmd, deps...)
-				return cmd
+				return []string{
+					"sh", "-c",
+					`if command -v bun >/dev/null 2>&1; then exec bun run "$1"; elif command -v deno >/dev/null 2>&1; then exec deno run --allow-all "$1"; else exec node "$1"; fi`,
+					"sh", scriptPath,
+				}
 			},
 		}, nil
 
@@ -146,7 +93,7 @@ func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
 		if task.Image == "" {
 			return RuntimeSpec{}, fmt.Errorf("task %q with runtime %q requires an image", task.ID, task.Runtime)
 		}
-		if len(deps) > 0 {
+		if hasDeps {
 			return RuntimeSpec{}, fmt.Errorf("task %q with runtime %q does not support dependencies", task.ID, task.Runtime)
 		}
 		return RuntimeSpec{
@@ -164,7 +111,8 @@ func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
 
 // DockerRunner executes workflow tasks inside ephemeral Docker containers.
 type DockerRunner struct {
-	cli *client.Client
+	cli     *client.Client
+	noCache bool
 }
 
 // NewDockerRunner initializes a Docker SDK client using environment settings and API negotiation.
@@ -176,6 +124,11 @@ func NewDockerRunner() (*DockerRunner, error) {
 	return &DockerRunner{cli: cli}, nil
 }
 
+// SetNoCache configures whether dependency image caching should be bypassed and rebuilt.
+func (r *DockerRunner) SetNoCache(noCache bool) {
+	r.noCache = noCache
+}
+
 // Close releases resources held by the Docker client.
 func (r *DockerRunner) Close() error {
 	if r.cli == nil {
@@ -184,7 +137,7 @@ func (r *DockerRunner) Close() error {
 	return r.cli.Close()
 }
 
-// RunTask writes the task script to the shared workspace, ensures the runtime image exists,
+// RunTask writes the task script to the shared workspace, ensures the runtime/cache image exists,
 // executes the container, captures logs, and removes the container afterward.
 func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string, task workflow.Task) (*Result, error) {
 	spec, err := resolveRuntimeSpec(task)
@@ -203,13 +156,22 @@ func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string,
 		return nil, fmt.Errorf("write script file %q: %w", hostScriptPath, err)
 	}
 
-	if err := r.ensureImage(ctx, spec.Image); err != nil {
+	baseInfo, err := r.ensureImage(ctx, spec.Image)
+	if err != nil {
 		return nil, err
+	}
+
+	runImage := spec.Image
+	if len(task.Dependencies) > 0 {
+		runImage, err = r.ensureDependencyImage(ctx, spec.Image, baseInfo.ID, task)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	containerScriptPath := containerWorkspaceDir + "/" + scriptsSubdir + "/" + scriptFilename
 	cfg := &container.Config{
-		Image:      spec.Image,
+		Image:      runImage,
 		Cmd:        spec.Command(containerScriptPath),
 		Env:        formatEnv(task.Env),
 		WorkingDir: containerWorkspaceDir,
@@ -255,29 +217,33 @@ func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string,
 	}, nil
 }
 
-func (r *DockerRunner) ensureImage(ctx context.Context, imageName string) error {
-	_, err := r.cli.ImageInspect(ctx, imageName)
+func (r *DockerRunner) ensureImage(ctx context.Context, imageName string) (image.InspectResponse, error) {
+	info, err := r.cli.ImageInspect(ctx, imageName)
 	if err == nil {
-		return nil
+		return info, nil
 	}
 	if !client.IsErrNotFound(err) {
-		return fmt.Errorf("inspect image %q: %w", imageName, err)
+		return image.InspectResponse{}, fmt.Errorf("inspect image %q: %w", imageName, err)
 	}
 
 	fmt.Printf("[runner] Image %s not found locally, pulling...\n", imageName)
 	pullStream, err := r.cli.ImagePull(ctx, imageName, image.PullOptions{})
 	if err != nil {
-		return fmt.Errorf("pull image %q: %w", imageName, err)
+		return image.InspectResponse{}, fmt.Errorf("pull image %q: %w", imageName, err)
 	}
 	defer pullStream.Close()
 
 	fd := os.Stdout.Fd()
 	isTerm := isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 	if err := jsonmessage.DisplayJSONMessagesStream(pullStream, os.Stdout, fd, isTerm, nil); err != nil {
-		return fmt.Errorf("stream pull progress for %q: %w", imageName, err)
+		return image.InspectResponse{}, fmt.Errorf("stream pull progress for %q: %w", imageName, err)
 	}
 
-	return nil
+	info, err = r.cli.ImageInspect(ctx, imageName)
+	if err != nil {
+		return image.InspectResponse{}, fmt.Errorf("inspect pulled image %q: %w", imageName, err)
+	}
+	return info, nil
 }
 
 func (r *DockerRunner) waitContainer(ctx context.Context, containerID string) (int64, error) {
