@@ -1,0 +1,53 @@
+{{define "layout"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · Orchestrator</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js"></script>
+  <script defer src="/static/alpine.min.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">F</div>
+        <div>
+          <div class="brand-title">Orchestrator</div>
+          <div class="brand-sub">v0.1 · Local Runner</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <a href="/" class="nav-link {{if eq .Nav "dashboard"}}active{{end}}">
+          <span>Dashboard</span>
+        </a>
+        <a href="/flows" class="nav-link {{if eq .Nav "flows"}}active{{end}}">
+          <span>Flows</span>
+        </a>
+        <a href="/executions" class="nav-link {{if eq .Nav "executions"}}active{{end}}">
+          <span>Executions</span>
+          {{if gt .RunningCount 0}}
+            <span class="badge badge-running">{{.RunningCount}}</span>
+          {{end}}
+        </a>
+        <a href="/includes" class="nav-link {{if eq .Nav "includes"}}active{{end}}">
+          <span>Includes</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div>Port: <span class="mono">{{.Addr}}</span></div>
+        <div>Scheduler: <span class="mono">{{if .SchedulerOn}}enabled{{else}}standby{{end}}</span></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      {{template "content" .}}
+    </main>
+  </div>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,39 @@
+name: workspace-audit
+cron: "*/30 * * * *"
+include:
+  - includes
+tasks:
+  - id: check_env
+    image: alpine:3.20
+    script: |
+      echo "[check_env] Verifying mounted /includes directory"
+      ls -la /includes > /workspace/includes_listing.txt
+      cat /workspace/includes_listing.txt
+
+  - id: inspect_metrics
+    runtime: python
+    depends_on:
+      - check_env
+    script: |
+      import json
+      import os
+      from datetime import datetime, timezone
+
+      report = {
+          "checked_at": datetime.now(timezone.utc).isoformat(),
+          "pipeline_env": os.environ.get("PIPELINE_ENV", "local"),
+          "includes_count": len(os.listdir("/includes")),
+      }
+      with open("/workspace/audit_report.json", "w", encoding="utf-8") as f:
+          json.dump(report, f, indent=2)
+      print("[inspect_metrics] Report written:", json.dumps(report))
+
+  - id: publish_summary
+    runtime: js
+    depends_on:
+      - inspect_metrics
+    script: |
+      import { readFileSync } from "fs";
+
+      const report = JSON.parse(readFileSync("/workspace/audit_report.json", "utf-8"));
+      console.log(`[publish_summary] Audited ${report.includes_count} include item(s) at ${report.checked_at}`);

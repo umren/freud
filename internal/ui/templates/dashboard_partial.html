@@ -1,0 +1,92 @@
+{{define "dashboard_content"}}
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-label">Total Executions</div>
+    <div class="stat-value">{{.Stats.Total}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Succeeded</div>
+    <div class="stat-value success">{{.Stats.Success}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Failed</div>
+    <div class="stat-value failed">{{.Stats.Failed}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Running</div>
+    <div class="stat-value running">{{.Stats.Running}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Success Rate</div>
+    <div class="stat-value">{{.SuccessRate}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Loaded Flows</div>
+    <div class="stat-value">{{.FlowCount}}</div>
+  </div>
+</div>
+
+<div class="grid-2">
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Next Scheduled Runs</h2>
+      <a href="/flows" class="mono">View flows →</a>
+    </div>
+    {{if .Upcoming}}
+    <table>
+      <thead>
+        <tr>
+          <th>Flow</th>
+          <th>Cron</th>
+          <th>Next Run</th>
+          <th>In</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Upcoming}}
+        <tr>
+          <td><a href="/flows/{{.FileName}}"><strong>{{.Name}}</strong></a></td>
+          <td><span class="badge badge-accent mono">{{.Cron}}</span></td>
+          <td class="mono muted">{{.NextRunFormatted}}</td>
+          <td class="mono">{{.StartsIn}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">No flows with a <span class="mono">cron</span> schedule found in <span class="mono">flows/</span>.</div>
+    {{end}}
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Recent Executions</h2>
+      <a href="/executions" class="mono">All executions →</a>
+    </div>
+    {{if .RecentRuns}}
+    <table>
+      <thead>
+        <tr>
+          <th>Run ID</th>
+          <th>Flow</th>
+          <th>Status</th>
+          <th>Duration</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .RecentRuns}}
+        <tr>
+          <td class="mono"><a href="/executions/{{.ID}}">{{.ID}}</a></td>
+          <td>{{.WorkflowName}}</td>
+          <td><span class="badge badge-{{.StatusSlug}}"><span class="dot"></span>{{.Status}}</span></td>
+          <td class="mono muted">{{.Duration}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">No executions recorded yet. Run a workflow with <span class="mono">orchestrator run flows/etl-example.yaml</span>.</div>
+    {{end}}
+  </section>
+</div>
+{{end}}

@@ -1,0 +1,83 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <div class="muted" style="font-size:12px;margin-bottom:4px"><a href="/flows">← Back to Flows</a></div>
+    <h1 class="page-title">{{.Flow.Name}}</h1>
+    <p class="page-sub">
+      File: <span class="mono">{{.Flow.FilePath}}</span>
+      {{if .Flow.Cron}}
+        · Cron: <span class="badge badge-accent mono">{{.Flow.Cron}}</span>
+        · Next: <span class="mono">{{.NextRun}} ({{.StartsIn}})</span>
+      {{end}}
+    </p>
+  </div>
+  <span class="badge badge-neutral">Read-Only</span>
+</div>
+
+<div x-data="{ tab: 'yaml', copied: false }">
+  <div class="tabs">
+    <button class="tab-btn" :class="{ active: tab === 'yaml' }" @click="tab = 'yaml'">YAML Source (Read-Only)</button>
+    <button class="tab-btn" :class="{ active: tab === 'topology' }" @click="tab = 'topology'">Topology ({{.Flow.TaskCount}} tasks)</button>
+    <button class="tab-btn" :class="{ active: tab === 'executions' }" @click="tab = 'executions'">Recent Executions ({{len .RecentRuns}})</button>
+  </div>
+
+  <section class="card" x-show="tab === 'yaml'">
+    <div class="card-head">
+      <h2 class="card-title mono">{{.Flow.FileName}}</h2>
+      <button class="btn" @click="navigator.clipboard.writeText($refs.rawYaml.textContent); copied = true; setTimeout(() => copied = false, 1500)" x-text="copied ? 'Copied!' : 'Copy YAML'"></button>
+    </div>
+    <div class="card-body">
+      <div class="code-wrap">
+        <div class="code-lines">
+          {{range .YAMLLines}}
+          <div class="code-line">
+            <span class="code-ln">{{.Number}}</span>
+            <span class="code-txt">{{.HTML}}</span>
+          </div>
+          {{end}}
+        </div>
+      </div>
+      <pre x-ref="rawYaml" style="display:none">{{.Flow.RawYAML}}</pre>
+    </div>
+  </section>
+
+  <section class="card" x-show="tab === 'topology'" x-cloak>
+    <div class="card-head">
+      <h2 class="card-title">Task Dependency Graph</h2>
+    </div>
+    <div class="card-body">
+      {{template "dag_svg" .DAG}}
+    </div>
+  </section>
+
+  <section class="card" x-show="tab === 'executions'" x-cloak>
+    <div class="card-head">
+      <h2 class="card-title">Recent Executions for {{.Flow.Name}}</h2>
+    </div>
+    {{if .RecentRuns}}
+    <table>
+      <thead>
+        <tr>
+          <th>Run ID</th>
+          <th>Status</th>
+          <th>Started</th>
+          <th>Duration</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .RecentRuns}}
+        <tr>
+          <td class="mono"><a href="/executions/{{.ID}}">{{.ID}}</a></td>
+          <td><span class="badge badge-{{.StatusSlug}}"><span class="dot"></span>{{.Status}}</span></td>
+          <td class="mono muted">{{.StartedAt}}</td>
+          <td class="mono muted">{{.Duration}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">No executions recorded for this flow yet.</div>
+    {{end}}
+  </section>
+</div>
+{{end}}

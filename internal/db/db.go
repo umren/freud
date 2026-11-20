@@ -17,11 +17,12 @@ const (
 
 // RunRecord represents a row in the runs table.
 type RunRecord struct {
-	ID           string
-	WorkflowName string
-	Status       string
-	CreatedAt    string
-	FinishedAt   sql.NullString
+	ID             string
+	WorkflowName   string
+	Status         string
+	CreatedAt      string
+	FinishedAt     sql.NullString
+	DefinitionJSON sql.NullString
 }
 
 // TaskRunRecord represents a row in the task_runs table.
@@ -34,6 +35,16 @@ type TaskRunRecord struct {
 	Logs       sql.NullString
 	StartedAt  string
 	FinishedAt sql.NullString
+	Runtime    sql.NullString
+	Image      sql.NullString
+}
+
+// RunStats holds aggregate execution counts across all workflow runs.
+type RunStats struct {
+	Total   int
+	Success int
+	Failed  int
+	Running int
 }
 
 // Store wraps SQLite persistence for workflow runs and task runs.
@@ -92,7 +103,8 @@ CREATE TABLE IF NOT EXISTS runs (
 	workflow_name TEXT NOT NULL,
 	status TEXT NOT NULL,
 	created_at TEXT NOT NULL,
-	finished_at TEXT
+	finished_at TEXT,
+	definition_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_runs (
@@ -104,24 +116,82 @@ CREATE TABLE IF NOT EXISTS task_runs (
 	logs TEXT,
 	started_at TEXT NOT NULL,
 	finished_at TEXT,
+	runtime TEXT,
+	image TEXT,
 	FOREIGN KEY (run_id) REFERENCES runs(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id);
+CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
 `
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
+	}
+
+	alterations := []struct {
+		table  string
+		column string
+		def    string
+	}{
+		{"runs", "definition_json", "TEXT"},
+		{"task_runs", "runtime", "TEXT"},
+		{"task_runs", "image", "TEXT"},
+	}
+	for _, alt := range alterations {
+		if err := s.ensureColumn(alt.table, alt.column, alt.def); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *Store) ensureColumn(table, column, colType string) error {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s);", table))
+	if err != nil {
+		return fmt.Errorf("inspect table %q: %w", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan table info for %q: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table info for %q: %w", table, err)
+	}
+
+	if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", table, column, colType)); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
 }
 
 // CreateRun inserts a new workflow run in RUNNING state.
 func (s *Store) CreateRun(ctx context.Context, runID, workflowName string) error {
+	return s.CreateRunWithDefinition(ctx, runID, workflowName, "")
+}
+
+// CreateRunWithDefinition inserts a new workflow run in RUNNING state with a JSON workflow snapshot.
+func (s *Store) CreateRunWithDefinition(ctx context.Context, runID, workflowName, definitionJSON string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var def sql.NullString
+	if definitionJSON != "" {
+		def = sql.NullString{String: definitionJSON, Valid: true}
+	}
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO runs (id, workflow_name, status, created_at) VALUES (?, ?, ?, ?)`,
-		runID, workflowName, StatusRunning, now,
+		`INSERT INTO runs (id, workflow_name, status, created_at, definition_json) VALUES (?, ?, ?, ?, ?)`,
+		runID, workflowName, StatusRunning, now, def,
 	)
 	if err != nil {
 		return fmt.Errorf("insert run %q: %w", runID, err)
@@ -149,11 +219,23 @@ func (s *Store) FinishRun(ctx context.Context, runID, status string) error {
 
 // CreateTaskRun inserts a new task execution record in RUNNING state and returns its ID.
 func (s *Store) CreateTaskRun(ctx context.Context, runID, taskID string) (int64, error) {
+	return s.CreateTaskRunWithMeta(ctx, runID, taskID, "", "")
+}
+
+// CreateTaskRunWithMeta inserts a new task execution record with runtime and image metadata.
+func (s *Store) CreateTaskRunWithMeta(ctx context.Context, runID, taskID, runtimeName, imageName string) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var rt, img sql.NullString
+	if runtimeName != "" {
+		rt = sql.NullString{String: runtimeName, Valid: true}
+	}
+	if imageName != "" {
+		img = sql.NullString{String: imageName, Valid: true}
+	}
 	res, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO task_runs (run_id, task_id, status, started_at) VALUES (?, ?, ?, ?)`,
-		runID, taskID, StatusRunning, now,
+		`INSERT INTO task_runs (run_id, task_id, status, started_at, runtime, image) VALUES (?, ?, ?, ?, ?, ?)`,
+		runID, taskID, StatusRunning, now, rt, img,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert task run for task %q: %w", taskID, err)
@@ -187,21 +269,115 @@ func (s *Store) FinishTaskRun(ctx context.Context, taskRunID int64, status strin
 func (s *Store) GetRun(ctx context.Context, runID string) (*RunRecord, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, workflow_name, status, created_at, finished_at FROM runs WHERE id = ?`,
+		`SELECT id, workflow_name, status, created_at, finished_at, definition_json FROM runs WHERE id = ?`,
 		runID,
 	)
 	var rec RunRecord
-	if err := row.Scan(&rec.ID, &rec.WorkflowName, &rec.Status, &rec.CreatedAt, &rec.FinishedAt); err != nil {
+	if err := row.Scan(&rec.ID, &rec.WorkflowName, &rec.Status, &rec.CreatedAt, &rec.FinishedAt, &rec.DefinitionJSON); err != nil {
 		return nil, fmt.Errorf("get run %q: %w", runID, err)
 	}
 	return &rec, nil
+}
+
+// GetRunStats returns aggregate counts of runs by status.
+func (s *Store) GetRunStats(ctx context.Context) (RunStats, error) {
+	var stats RunStats
+	row := s.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) AS total,
+			COALESCE(SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS success_cnt,
+			COALESCE(SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed_cnt,
+			COALESCE(SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END), 0) AS running_cnt
+		FROM runs
+	`)
+	if err := row.Scan(&stats.Total, &stats.Success, &stats.Failed, &stats.Running); err != nil {
+		return stats, fmt.Errorf("query run stats: %w", err)
+	}
+	return stats, nil
+}
+
+// ListRuns returns runs ordered from newest to oldest, optionally filtered by status.
+func (s *Store) ListRuns(ctx context.Context, limit int, statusFilter string) ([]RunRecord, error) {
+	query := `SELECT id, workflow_name, status, created_at, finished_at, definition_json FROM runs`
+	var args []any
+	if statusFilter != "" {
+		query += ` WHERE status = ?`
+		args = append(args, statusFilter)
+	}
+	query += ` ORDER BY created_at DESC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	return s.queryRuns(ctx, query, args...)
+}
+
+// ListRunsByWorkflow returns runs for a specific workflow ordered from newest to oldest.
+func (s *Store) ListRunsByWorkflow(ctx context.Context, workflowName string, limit int) ([]RunRecord, error) {
+	query := `SELECT id, workflow_name, status, created_at, finished_at, definition_json FROM runs WHERE workflow_name = ? ORDER BY created_at DESC`
+	args := []any{workflowName}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	return s.queryRuns(ctx, query, args...)
+}
+
+// GetLatestRunByWorkflow returns the most recent RunRecord keyed by workflow_name.
+func (s *Store) GetLatestRunByWorkflow(ctx context.Context) (map[string]RunRecord, error) {
+	runs, err := s.queryRuns(ctx, `
+		SELECT r.id, r.workflow_name, r.status, r.created_at, r.finished_at, r.definition_json
+		FROM runs r
+		INNER JOIN (
+			SELECT workflow_name, MAX(created_at) AS max_created
+			FROM runs
+			GROUP BY workflow_name
+		) latest ON r.workflow_name = latest.workflow_name AND r.created_at = latest.max_created
+	`)
+	if err != nil {
+		return nil, err
+	}
+	res := make(map[string]RunRecord, len(runs))
+	for _, r := range runs {
+		res[r.WorkflowName] = r
+	}
+	return res, nil
+}
+
+func (s *Store) queryRuns(ctx context.Context, query string, args ...any) ([]RunRecord, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query runs: %w", err)
+	}
+	defer rows.Close()
+
+	var records []RunRecord
+	for rows.Next() {
+		var rec RunRecord
+		if err := rows.Scan(
+			&rec.ID,
+			&rec.WorkflowName,
+			&rec.Status,
+			&rec.CreatedAt,
+			&rec.FinishedAt,
+			&rec.DefinitionJSON,
+		); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runs: %w", err)
+	}
+	return records, nil
 }
 
 // ListTaskRuns retrieves all task runs for a given run ID ordered by creation ID.
 func (s *Store) ListTaskRuns(ctx context.Context, runID string) ([]TaskRunRecord, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT id, run_id, task_id, status, exit_code, logs, started_at, finished_at FROM task_runs WHERE run_id = ? ORDER BY id ASC`,
+		`SELECT id, run_id, task_id, status, exit_code, logs, started_at, finished_at, runtime, image FROM task_runs WHERE run_id = ? ORDER BY id ASC`,
 		runID,
 	)
 	if err != nil {
@@ -221,6 +397,8 @@ func (s *Store) ListTaskRuns(ctx context.Context, runID string) ([]TaskRunRecord
 			&rec.Logs,
 			&rec.StartedAt,
 			&rec.FinishedAt,
+			&rec.Runtime,
+			&rec.Image,
 		); err != nil {
 			return nil, fmt.Errorf("scan task run: %w", err)
 		}

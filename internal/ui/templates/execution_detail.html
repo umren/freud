@@ -1,0 +1,7 @@
+{{define "content"}}
+<div x-data="{ tab: 'logs', logQuery: '' }">
+  <div {{if eq .Run.Status "RUNNING"}}hx-get="/partials/executions/{{.Run.ID}}" hx-trigger="every 2s" hx-swap="innerHTML"{{end}}>
+    {{template "execution_detail_content" .}}
+  </div>
+</div>
+{{end}}

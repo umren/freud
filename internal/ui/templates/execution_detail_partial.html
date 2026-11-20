@@ -1,0 +1,101 @@
+{{define "execution_detail_content"}}
+<div class="page-head">
+  <div>
+    <div class="muted" style="font-size:12px;margin-bottom:4px"><a href="/executions">← Back to Executions</a></div>
+    <h1 class="page-title">{{.Run.WorkflowName}} <span class="mono muted" style="font-size:16px">#{{.Run.ID}}</span></h1>
+    <p class="page-sub">
+      Started: <span class="mono">{{.Run.StartedAt}}</span>
+      · Finished: <span class="mono">{{.Run.FinishedAt}}</span>
+      · Duration: <span class="mono">{{.Run.Duration}}</span>
+    </p>
+  </div>
+  <span class="badge badge-{{.Run.StatusSlug}}"><span class="dot"></span>{{.Run.Status}}</span>
+</div>
+
+<div class="tabs">
+  <button class="tab-btn" :class="{ active: tab === 'logs' }" @click="tab = 'logs'">Tasks & Logs ({{len .Tasks}})</button>
+  <button class="tab-btn" :class="{ active: tab === 'gantt' }" @click="tab = 'gantt'">Gantt Timeline</button>
+  <button class="tab-btn" :class="{ active: tab === 'topology' }" @click="tab = 'topology'">Topology</button>
+</div>
+
+<div x-show="tab === 'logs'">
+  <div class="toolbar" style="margin-bottom:14px">
+    <input class="input" style="min-width:280px" type="search" placeholder="Filter tasks or logs..." x-model="logQuery">
+  </div>
+
+  {{if .Tasks}}
+    {{range .Tasks}}
+    <section class="card" x-data="{ open: true, copied: false }"
+             x-show="logQuery === '' || '{{.SearchKey}}'.includes(logQuery.toLowerCase())">
+      <div class="card-head">
+        <div class="toolbar">
+          <strong class="mono">{{.TaskID}}</strong>
+          <span class="badge badge-{{.StatusSlug}}"><span class="dot"></span>{{.Status}}</span>
+          {{if .Runtime}}<span class="badge badge-neutral mono">{{.Runtime}}</span>{{end}}
+          {{if .Image}}<span class="badge badge-neutral mono">{{.Image}}</span>{{end}}
+          {{if .HasExitCode}}<span class="badge badge-neutral mono">exit {{.ExitCode}}</span>{{end}}
+          <span class="mono muted">{{.Duration}}</span>
+        </div>
+        <div class="toolbar">
+          {{if .Logs}}
+          <button class="btn" @click="navigator.clipboard.writeText($refs.taskLog.textContent); copied = true; setTimeout(() => copied = false, 1500)" x-text="copied ? 'Copied!' : 'Copy log'"></button>
+          {{end}}
+          <button class="btn" @click="open = !open" x-text="open ? 'Collapse' : 'Expand'"></button>
+        </div>
+      </div>
+      <div class="card-body" x-show="open">
+        {{if .Logs}}
+          <pre class="log-box" x-ref="taskLog">{{.Logs}}</pre>
+        {{else}}
+          <div class="muted">No log output recorded for this task.</div>
+        {{end}}
+      </div>
+    </section>
+    {{end}}
+  {{else}}
+    <div class="card"><div class="empty">No task runs recorded yet.</div></div>
+  {{end}}
+</div>
+
+<div x-show="tab === 'gantt'" x-cloak>
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Task Execution Timeline</h2>
+      <span class="mono muted">Total: {{.Run.Duration}}</span>
+    </div>
+    <div class="card-body">
+      {{if .Tasks}}
+        {{range .Tasks}}
+        <div class="gantt-row">
+          <div>
+            <div class="mono"><strong>{{.TaskID}}</strong></div>
+            <div class="muted" style="font-size:11px">{{.Status}}{{if .Runtime}} · {{.Runtime}}{{end}}</div>
+          </div>
+          <div class="gantt-track">
+            <div class="gantt-bar {{.StatusSlug}}" style="left: {{.OffsetPct}}%; width: {{.WidthPct}}%;"></div>
+          </div>
+          <div class="mono muted" style="text-align:right">{{.Duration}}</div>
+        </div>
+        {{end}}
+      {{else}}
+        <div class="empty">No task timing data available.</div>
+      {{end}}
+    </div>
+  </section>
+</div>
+
+<div x-show="tab === 'topology'" x-cloak>
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Execution Topology</h2>
+    </div>
+    <div class="card-body">
+      {{if .DAG.Nodes}}
+        {{template "dag_svg" .DAG}}
+      {{else}}
+        <div class="empty">Topology snapshot is not available for this legacy run.</div>
+      {{end}}
+    </div>
+  </section>
+</div>
+{{end}}

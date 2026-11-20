@@ -1,0 +1,67 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Includes</h1>
+    <p class="page-sub">Shared helper files in <span class="mono">{{.IncludesDir}}/</span> mounted read-only at <span class="mono">/includes</span></p>
+  </div>
+  <span class="badge badge-neutral">Read-Only</span>
+</div>
+
+<div class="split-layout" x-data="{ q: '', copied: false }">
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Files ({{len .Files}})</h2>
+    </div>
+    <div class="card-body" style="padding:10px 12px;border-bottom:1px solid var(--border)">
+      <input class="input" style="width:100%" type="search" placeholder="Filter files..." x-model="q">
+    </div>
+    {{if .Files}}
+      <div>
+        {{range .Files}}
+        <a href="/includes?file={{.RelPath}}"
+           class="file-item {{if eq $.SelectedRel .RelPath}}active{{end}}"
+           x-show="q === '' || '{{.SearchKey}}'.includes(q.toLowerCase())">
+          <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{.RelPath}}</span>
+          <span class="muted mono" style="font-size:11px;flex-shrink:0">{{.SizeFormatted}}</span>
+        </a>
+        {{end}}
+      </div>
+    {{else}}
+      <div class="empty">No files found in <span class="mono">{{.IncludesDir}}/</span>.</div>
+    {{end}}
+  </section>
+
+  <section class="card">
+    {{if .SelectedRel}}
+      <div class="card-head">
+        <div>
+          <h2 class="card-title mono">/includes/{{.SelectedRel}}</h2>
+          <div class="muted" style="font-size:11px">Host path: <span class="mono">{{.IncludesDir}}/{{.SelectedRel}}</span> · {{.SelectedSize}}</div>
+        </div>
+        {{if not .ReadErr}}
+        <button class="btn" @click="navigator.clipboard.writeText($refs.incRaw.textContent); copied = true; setTimeout(() => copied = false, 1500)" x-text="copied ? 'Copied!' : 'Copy'"></button>
+        {{end}}
+      </div>
+      <div class="card-body">
+        {{if .ReadErr}}
+          <div class="alert-error">{{.ReadErr}}</div>
+        {{else}}
+          <div class="code-wrap">
+            <div class="code-lines">
+              {{range .Lines}}
+              <div class="code-line">
+                <span class="code-ln">{{.Number}}</span>
+                <span class="code-txt">{{.HTML}}</span>
+              </div>
+              {{end}}
+            </div>
+          </div>
+          <pre x-ref="incRaw" style="display:none">{{.RawContent}}</pre>
+        {{end}}
+      </div>
+    {{else}}
+      <div class="empty">Select a file from <span class="mono">{{.IncludesDir}}/</span> to inspect its read-only contents.</div>
+    {{end}}
+  </section>
+</div>
+{{end}}

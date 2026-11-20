@@ -1,0 +1,30 @@
+{{define "executions_table"}}
+{{if .Runs}}
+<table>
+  <thead>
+    <tr>
+      <th>Run ID</th>
+      <th>Flow</th>
+      <th>Status</th>
+      <th>Started</th>
+      <th>Finished</th>
+      <th>Duration</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Runs}}
+    <tr x-show="query === '' || '{{.SearchKey}}'.includes(query.toLowerCase())">
+      <td class="mono"><a href="/executions/{{.ID}}">{{.ID}}</a></td>
+      <td><strong>{{.WorkflowName}}</strong></td>
+      <td><span class="badge badge-{{.StatusSlug}}"><span class="dot"></span>{{.Status}}</span></td>
+      <td class="mono muted">{{.StartedAt}}</td>
+      <td class="mono muted">{{.FinishedAt}}</td>
+      <td class="mono">{{.Duration}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<div class="empty">No matching executions found.</div>
+{{end}}
+{{end}}

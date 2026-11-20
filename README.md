@@ -14,6 +14,7 @@ A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype
 - **Shared per-run workspace & read-only includes**: creates `./workspaces/<run_id>` on the host (mounted at `/workspace`) and mounts external helper modules/configs from `includes/` (or explicit `include:` paths) read-only at `/includes` with zero file copying.
 - **Reliable log & status capture**: disables `AutoRemove`, waits for container completion, demultiplexes stdout/stderr, prints output, stores logs and exit codes in SQLite, and then removes the container.
 - **Fail-fast execution**: stops the pipeline immediately if a task exits with a non-zero status, marking both the task and the workflow run as `FAILED`.
+- **Cron schedules & embedded Web UI**: workflows support standard 5-field `cron` expressions (and `@hourly`/`@daily`/etc.), and `orchestrator ui` serves a Kestra-inspired web UI (Go `html/template` + embedded HTMX & Alpine.js) on port `4321` with Dashboard, Flows, Executions, and Includes pages.
 - **SQLite persistence (`orchestrator.db`)**: configured with `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;`.
 
 ## Requirements
@@ -25,16 +26,19 @@ A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype
 
 ```text
 .
-├── main.go                 # CLI entrypoint (`run <path/to/workflow.yaml>`)
-├── example.yaml            # Two-step Python -> Bun/JS ETL example workflow
+├── main.go                 # CLI entrypoint (`run`, `ui`, `cache`)
+├── flows/                  # Workflow YAML definitions (`etl-example.yaml`, `workspace-audit.yaml`)
+├── includes/               # Shared helper files mounted read-only at `/includes`
 ├── go.mod
 ├── go.sum
 └── internal/
+    ├── cron/               # 5-field cron parser and next-run calculator
     ├── workflow/           # YAML parsing, validation, cycle detection, topological sort
     ├── env/                # .env file loader and task environment merging
     ├── db/                 # SQLite initialization, WAL pragmas, migrations, state queries
-    ├── runner/             # Docker SDK execution, image pull, log capture, cleanup
-    └── engine/             # Pipeline orchestration and workspace lifecycle
+    ├── runner/             # Docker SDK execution, image pull/cache, log capture, cleanup
+    ├── engine/             # Pipeline orchestration and workspace lifecycle
+    └── ui/                 # Embedded web UI (templates, HTMX/Alpine static assets, HTTP server)
 ```
 
 ## Build
@@ -55,15 +59,29 @@ CGO_ENABLED=0 go build -o orchestrator .
 Run a workflow YAML file:
 
 ```bash
-./orchestrator run example.yaml
+./orchestrator run flows/etl-example.yaml
 ```
 
 Optionally pass a custom `.env` file or force-rebuild cached dependency images:
 
 ```bash
-./orchestrator run --env-file .env.prod example.yaml
-./orchestrator run --no-cache example.yaml
+./orchestrator run --env-file .env.prod flows/etl-example.yaml
+./orchestrator run --no-cache flows/etl-example.yaml
 ```
+
+Start the embedded Web UI (default port `4321`):
+
+```bash
+./orchestrator ui
+# Optional flags:
+./orchestrator ui --port 4321 --flows-dir flows --includes-dir includes --scheduler
+```
+
+The Web UI exposes four pages (read-only views, no auth required locally):
+- **Dashboard (`/`)**: execution counts, success rate, upcoming cron runs, and recent executions (auto-refreshes via HTMX).
+- **Flows (`/flows`)**: workflows discovered in `flows/`, cron schedules, SVG task topology, and read-only YAML source viewer.
+- **Executions (`/executions`)**: newest-to-oldest execution history with status filter, search, task logs, Gantt timeline, and execution topology.
+- **Includes (`/includes`)**: read-only file browser for `includes/`.
 
 Manage cached dependency images:
 
@@ -81,17 +99,19 @@ Manage cached dependency images:
 
 You can interrupt a running workflow with `Ctrl+C` (`SIGINT`/`SIGTERM`), which cancels execution and records the active task and run as `FAILED`.
 
-### Example (`example.yaml`)
+### Example Flows (`flows/`)
 
-The included [`example.yaml`](example.yaml) demonstrates file-based data exchange between two runtimes:
-
-1. **`extract`** (`runtime: python`, `image: python:3.13-slim`, `dependencies: [pydantic, pyyaml]`, `include: [includes/payload_utils.py]`): installs `pydantic` and `pyyaml`, imports `payload_utils` from `/includes` via `PYTHONPATH`, reads variables from `.env`, prints a YAML summary, and writes `/workspace/payload.json`.
-2. **`transform`** (`runtime: js`, `depends_on: [extract]`, `dependencies: [lodash-es, ms]`, `include: [includes/math_utils.ts]`): installs `lodash-es` and `ms`, imports `formatStats` from `/includes/math_utils.ts`, reads `/workspace/payload.json`, computes the sum (`102`) with `lodash-es`, and prints the `.env` variables and stats to stdout.
+1. **[`flows/etl-example.yaml`](flows/etl-example.yaml)** (`cron: "0 */6 * * *"`):
+   - **`extract`** (`runtime: python`, `image: python:3.13-slim`, `dependencies: [pydantic, pyyaml]`, `include: [includes/payload_utils.py]`): installs `pydantic` and `pyyaml`, imports `payload_utils` from `/includes` via `PYTHONPATH`, reads variables from `.env`, prints a YAML summary, and writes `/workspace/payload.json`.
+   - **`transform`** (`runtime: js`, `depends_on: [extract]`, `dependencies: [lodash-es, ms]`, `include: [includes/math_utils.ts]`): installs `lodash-es` and `ms`, imports `formatStats` from `/includes/math_utils.ts`, reads `/workspace/payload.json`, computes the sum (`102`) with `lodash-es`, and prints the `.env` variables and stats to stdout.
+2. **[`flows/workspace-audit.yaml`](flows/workspace-audit.yaml)** (`cron: "*/30 * * * *"`, `include: [includes]`):
+   - Three-step `alpine:3.20` -> `python` -> `js` pipeline inspecting mounted `/includes` items and publishing an audit summary.
 
 ## Workflow YAML Specification
 
 ```yaml
 name: my-pipeline
+cron: "0 */6 * * *"           # optional 5-field cron expression (or @hourly, @daily, etc.)
 include:                      # optional workflow-wide read-only files/dirs mounted under /includes
   - includes/shared.py
 tasks:

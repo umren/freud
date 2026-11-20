@@ -329,27 +329,31 @@ func resolveIncludeMounts(task workflow.Task) ([]mount.Mount, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve workflow base directory %q: %w", baseDir, err)
 	}
+	roots := includeSearchRoots(absBase)
 
 	if len(task.Include) == 0 {
-		defaultDir := filepath.Join(absBase, defaultIncludesSubdir)
-		info, err := os.Stat(defaultDir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, nil
+		for _, root := range roots {
+			defaultDir := filepath.Join(root, defaultIncludesSubdir)
+			info, err := os.Stat(defaultDir)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return nil, fmt.Errorf("inspect default includes directory %q: %w", defaultDir, err)
 			}
-			return nil, fmt.Errorf("inspect default includes directory %q: %w", defaultDir, err)
+			if !info.IsDir() {
+				continue
+			}
+			return []mount.Mount{
+				{
+					Type:     mount.TypeBind,
+					Source:   defaultDir,
+					Target:   containerIncludesDir,
+					ReadOnly: true,
+				},
+			}, nil
 		}
-		if !info.IsDir() {
-			return nil, nil
-		}
-		return []mount.Mount{
-			{
-				Type:     mount.TypeBind,
-				Source:   defaultDir,
-				Target:   containerIncludesDir,
-				ReadOnly: true,
-			},
-		}, nil
+		return nil, nil
 	}
 
 	type candidate struct {
@@ -365,18 +369,9 @@ func resolveIncludeMounts(task workflow.Task) ([]mount.Mount, error) {
 			return nil, fmt.Errorf("invalid include path %q for task %q", rel, task.ID)
 		}
 
-		absSource := filepath.Join(absBase, filepath.FromSlash(cleanRel))
-		relCheck, err := filepath.Rel(absBase, absSource)
-		if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
-			return nil, fmt.Errorf("include path %q escapes base directory", rel)
-		}
-
-		info, err := os.Stat(absSource)
+		absSource, info, err := locateIncludeSource(roots, cleanRel, rel, task.ID)
 		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("include path %q for task %q does not exist", rel, task.ID)
-			}
-			return nil, fmt.Errorf("stat include path %q: %w", rel, err)
+			return nil, err
 		}
 
 		target := containerIncludesDir + "/" + cleanRel
@@ -422,6 +417,46 @@ func resolveIncludeMounts(task workflow.Task) ([]mount.Mount, error) {
 	}
 
 	return mounts, nil
+}
+
+func includeSearchRoots(absBase string) []string {
+	roots := []string{absBase}
+	if filepath.Base(absBase) == "flows" {
+		roots = append(roots, filepath.Dir(absBase))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		if absWD, err := filepath.Abs(wd); err == nil {
+			already := false
+			for _, r := range roots {
+				if r == absWD {
+					already = true
+					break
+				}
+			}
+			if !already {
+				roots = append(roots, absWD)
+			}
+		}
+	}
+	return roots
+}
+
+func locateIncludeSource(roots []string, cleanRel, rawRel, taskID string) (string, os.FileInfo, error) {
+	for _, root := range roots {
+		absSource := filepath.Join(root, filepath.FromSlash(cleanRel))
+		relCheck, err := filepath.Rel(root, absSource)
+		if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
+			continue
+		}
+		info, err := os.Stat(absSource)
+		if err == nil {
+			return absSource, info, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("stat include path %q: %w", rawRel, err)
+		}
+	}
+	return "", nil, fmt.Errorf("include path %q for task %q does not exist", rawRel, taskID)
 }
 
 func isCoveredByMountedDir(target string, mountedDirs map[string]struct{}) bool {

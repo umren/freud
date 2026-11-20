@@ -1,0 +1,35 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Executions</h1>
+    <p class="page-sub">All workflow runs ordered from newest to oldest</p>
+  </div>
+  <span class="badge badge-neutral">Auto-refresh 3s</span>
+</div>
+
+<section class="card" x-data="{ status: '{{.StatusFilter}}', query: '' }">
+  <div class="card-head">
+    <h2 class="card-title">Execution History</h2>
+    <div class="toolbar">
+      <input class="input" type="search" placeholder="Search run ID or flow..." x-model="query">
+      <select class="select" name="status" x-model="status"
+              hx-get="/partials/executions"
+              hx-target="#executions-body"
+              hx-swap="innerHTML">
+        <option value="">All statuses</option>
+        <option value="SUCCESS">SUCCESS</option>
+        <option value="FAILED">FAILED</option>
+        <option value="RUNNING">RUNNING</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="executions-body"
+       hx-get="/partials/executions"
+       hx-include="[name='status']"
+       hx-trigger="every 3s"
+       hx-swap="innerHTML">
+    {{template "executions_table" .}}
+  </div>
+</section>
+{{end}}

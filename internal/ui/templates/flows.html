@@ -1,0 +1,71 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Flows</h1>
+    <p class="page-sub">Workflow definitions discovered in <span class="mono">{{.FlowsDir}}/</span> (read-only)</p>
+  </div>
+</div>
+
+<section class="card" x-data="{ q: '' }">
+  <div class="card-head">
+    <h2 class="card-title">Registered Flows ({{len .Flows}})</h2>
+    <input class="input" type="search" placeholder="Filter flows..." x-model="q">
+  </div>
+
+  {{if .Flows}}
+  <table>
+    <thead>
+      <tr>
+        <th>Flow Name</th>
+        <th>File</th>
+        <th>Tasks</th>
+        <th>Cron Schedule</th>
+        <th>Next Run</th>
+        <th>Last Execution</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Flows}}
+      <tr x-show="q === '' || '{{.SearchKey}}'.includes(q.toLowerCase())">
+        <td>
+          {{if .ParseErr}}
+            <span class="badge badge-failed">INVALID</span>
+            <span class="mono muted">{{.FileName}}</span>
+            <div class="muted" style="font-size:12px;margin-top:4px">{{.ParseErr}}</div>
+          {{else}}
+            <a href="/flows/{{.FileName}}"><strong>{{.Name}}</strong></a>
+          {{end}}
+        </td>
+        <td class="mono muted">{{.FileName}}</td>
+        <td class="mono">{{.TaskCount}}</td>
+        <td>
+          {{if .Cron}}
+            <span class="badge badge-accent mono">{{.Cron}}</span>
+          {{else}}
+            <span class="muted">manual</span>
+          {{end}}
+        </td>
+        <td class="mono muted">
+          {{if .NextRun}}
+            {{.NextRun}} <span style="font-size:11px">({{.StartsIn}})</span>
+          {{else}}
+            —
+          {{end}}
+        </td>
+        <td>
+          {{if .HasLastRun}}
+            <a href="/executions/{{.LastRunID}}" class="badge badge-{{.LastRunSlug}}"><span class="dot"></span>{{.LastRunStatus}}</a>
+            <span class="mono muted" style="font-size:11px;margin-left:6px">{{.LastRunAt}}</span>
+          {{else}}
+            <span class="muted">never run</span>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty">No <span class="mono">.yaml</span> / <span class="mono">.yml</span> files found in <span class="mono">{{.FlowsDir}}/</span>.</div>
+  {{end}}
+</section>
+{{end}}

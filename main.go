@@ -2,24 +2,31 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"freud/internal/db"
 	"freud/internal/engine"
 	"freud/internal/env"
 	"freud/internal/runner"
+	"freud/internal/ui"
 	"freud/internal/workflow"
 )
 
 const (
-	dbPath        = "orchestrator.db"
-	workspacesDir = "workspaces"
+	dbPath             = "orchestrator.db"
+	workspacesDir      = "workspaces"
+	defaultFlowsDir    = "flows"
+	defaultIncludesDir = "includes"
+	defaultUIPort      = 4321
 )
 
 func main() {
@@ -40,6 +47,8 @@ func runCLI(args []string) error {
 		return runWorkflowCmd(args[1:])
 	case "cache":
 		return runCacheCmd(args[1:])
+	case "ui":
+		return runUICmd(args[1:])
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -103,6 +112,86 @@ func runWorkflowCmd(args []string) error {
 	}
 
 	return nil
+}
+
+func runUICmd(args []string) error {
+	fs := flag.NewFlagSet("ui", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	port := fs.Int("port", defaultUIPort, "HTTP port to serve the web UI")
+	flowsDir := fs.String("flows-dir", defaultFlowsDir, "Directory containing workflow YAML files")
+	includesDir := fs.String("includes-dir", defaultIncludesDir, "Directory containing shared include files")
+	envFile := fs.String("env-file", "", "Optional path to a .env file (used when --scheduler is enabled)")
+	schedulerOn := fs.Bool("scheduler", false, "Enable background cron execution for scheduled flows")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *port <= 0 || *port > 65535 {
+		return fmt.Errorf("invalid port %d", *port)
+	}
+
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	addr := fmt.Sprintf(":%d", *port)
+	uiServer, err := ui.NewServer(store, ui.Config{
+		Addr:        addr,
+		FlowsDir:    *flowsDir,
+		IncludesDir: *includesDir,
+		SchedulerOn: *schedulerOn,
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if *schedulerOn {
+		baseEnv, loadedFiles, err := loadEnvironment(*envFile, "")
+		if err != nil {
+			return err
+		}
+		if len(loadedFiles) > 0 {
+			fmt.Printf("[scheduler] Loaded %d env variable(s) from %s\n", len(baseEnv), strings.Join(loadedFiles, ", "))
+		}
+		dockerRunner, err := runner.NewDockerRunner()
+		if err != nil {
+			return err
+		}
+		defer dockerRunner.Close()
+
+		eng := engine.New(store, dockerRunner, workspacesDir)
+		eng.SetEnv(baseEnv)
+		go ui.StartScheduler(ctx, eng, *flowsDir)
+		fmt.Printf("[scheduler] Cron scheduler enabled (watching %s/)\n", *flowsDir)
+	}
+
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           uiServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		fmt.Printf("[ui] Web UI listening on http://localhost%s\n", addr)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return httpServer.Shutdown(shutdownCtx)
+	}
 }
 
 func runCacheCmd(args []string) error {
@@ -188,6 +277,7 @@ func formatBytes(bytes int64) string {
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  orchestrator run [--env-file <path/to/.env>] [--no-cache] <path/to/workflow.yaml>")
+	fmt.Fprintln(os.Stderr, "  orchestrator ui [--port 4321] [--flows-dir flows] [--includes-dir includes] [--scheduler]")
 	fmt.Fprintln(os.Stderr, "  orchestrator cache ls")
 	fmt.Fprintln(os.Stderr, "  orchestrator cache clear")
 }

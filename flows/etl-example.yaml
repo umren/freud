@@ -1,4 +1,5 @@
 name: etl-example
+cron: "0 */6 * * *"
 tasks:
   - id: extract
     runtime: python

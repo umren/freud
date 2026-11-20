@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -68,7 +69,8 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 		return "", fmt.Errorf("create workspace directory %q: %w", scriptsDir, err)
 	}
 
-	if err := e.store.CreateRun(ctx, runID, wf.Name); err != nil {
+	defJSON := marshalWorkflowSnapshot(wf)
+	if err := e.store.CreateRunWithDefinition(ctx, runID, wf.Name, defJSON); err != nil {
 		return "", fmt.Errorf("record workflow run start: %w", err)
 	}
 
@@ -81,7 +83,7 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 			fmt.Printf("[engine] Running task %q (runtime=%s)\n", task.ID, task.Runtime)
 		}
 
-		taskRunID, err := e.store.CreateTaskRun(ctx, runID, task.ID)
+		taskRunID, err := e.store.CreateTaskRunWithMeta(ctx, runID, task.ID, task.Runtime, task.Image)
 		if err != nil {
 			e.markRunFailed(runID)
 			return runID, fmt.Errorf("record task %q start: %w", task.ID, err)
@@ -157,6 +159,40 @@ func (e *Engine) markRunFailed(runID string) {
 	if err := e.store.FinishRun(dbCtx, runID, db.StatusFailed); err != nil {
 		fmt.Fprintf(os.Stderr, "[engine] Warning: failed to persist run %s FAILED status: %v\n", runID, err)
 	}
+}
+
+type runDefinitionSnapshot struct {
+	Name  string             `json:"name"`
+	Cron  string             `json:"cron,omitempty"`
+	Tasks []taskDefSnapshot  `json:"tasks"`
+}
+
+type taskDefSnapshot struct {
+	ID        string   `json:"id"`
+	Runtime   string   `json:"runtime"`
+	Image     string   `json:"image,omitempty"`
+	DependsOn []string `json:"depends_on,omitempty"`
+}
+
+func marshalWorkflowSnapshot(wf *workflow.Workflow) string {
+	snap := runDefinitionSnapshot{
+		Name:  wf.Name,
+		Cron:  wf.Cron,
+		Tasks: make([]taskDefSnapshot, 0, len(wf.Tasks)),
+	}
+	for _, t := range wf.Tasks {
+		snap.Tasks = append(snap.Tasks, taskDefSnapshot{
+			ID:        t.ID,
+			Runtime:   t.Runtime,
+			Image:     t.Image,
+			DependsOn: t.DependsOn,
+		})
+	}
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func mergeIncludes(workflowIncludes, taskIncludes []string) []string {

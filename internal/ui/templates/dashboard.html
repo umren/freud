@@ -1,0 +1,13 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Dashboard</h1>
+    <p class="page-sub">Execution overview, health metrics, and upcoming cron schedules</p>
+  </div>
+  <span class="badge badge-neutral">Auto-refresh 3s</span>
+</div>
+
+<div hx-get="/partials/dashboard" hx-trigger="every 3s" hx-swap="innerHTML">
+  {{template "dashboard_content" .}}
+</div>
+{{end}}

@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"freud/internal/cron"
 )
 
 const (
@@ -18,9 +21,19 @@ const (
 // Workflow represents a parsed YAML pipeline definition.
 type Workflow struct {
 	Name    string   `yaml:"name"`
+	Cron    string   `yaml:"cron,omitempty"`
 	Include []string `yaml:"include,omitempty"`
 	Tasks   []Task   `yaml:"tasks"`
 	BaseDir string   `yaml:"-"`
+}
+
+// WorkflowEntry describes a workflow YAML file discovered in a flows directory.
+type WorkflowEntry struct {
+	FileName string
+	FilePath string
+	RawYAML  string
+	Workflow *Workflow
+	ParseErr error
 }
 
 // Task represents a single unit of execution within a workflow.
@@ -73,6 +86,12 @@ func Parse(data []byte) (*Workflow, error) {
 func (w *Workflow) Validate() error {
 	if strings.TrimSpace(w.Name) == "" {
 		return fmt.Errorf("workflow name must not be empty")
+	}
+	w.Cron = strings.TrimSpace(w.Cron)
+	if w.Cron != "" {
+		if err := cron.Validate(w.Cron); err != nil {
+			return fmt.Errorf("workflow %q: %w", w.Name, err)
+		}
 	}
 	if len(w.Tasks) == 0 {
 		return fmt.Errorf("workflow %q must define at least one task", w.Name)
@@ -241,4 +260,55 @@ func validateIncludePaths(paths []string) error {
 		paths[i] = clean
 	}
 	return nil
+}
+
+// LoadDir scans a directory for .yaml/.yml workflow files, returning sorted entries.
+// Individual parse errors are captured in WorkflowEntry.ParseErr so callers can display them.
+func LoadDir(dir string) ([]WorkflowEntry, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read flows directory %q: %w", dir, err)
+	}
+
+	var result []WorkflowEntry
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+
+		fullPath := filepath.Join(dir, entry.Name())
+		rawBytes, readErr := os.ReadFile(fullPath)
+		item := WorkflowEntry{
+			FileName: entry.Name(),
+			FilePath: fullPath,
+			RawYAML:  string(rawBytes),
+		}
+		if readErr != nil {
+			item.ParseErr = readErr
+		} else {
+			wf, parseErr := Parse(rawBytes)
+			if parseErr != nil {
+				item.ParseErr = parseErr
+			} else {
+				absPath, absErr := filepath.Abs(fullPath)
+				if absErr == nil {
+					wf.BaseDir = filepath.Dir(absPath)
+				}
+				item.Workflow = wf
+			}
+		}
+		result = append(result, item)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].FileName < result[j].FileName
+	})
+	return result, nil
 }

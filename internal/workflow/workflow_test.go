@@ -1,7 +1,6 @@
 package workflow
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -172,16 +171,37 @@ tasks:
 	}
 }
 
-func TestParseExampleFile(t *testing.T) {
-	examplePath := filepath.Join("..", "..", "example.yaml")
-	if _, err := os.Stat(examplePath); err != nil {
-		t.Skipf("example.yaml not found at %s", examplePath)
-	}
-	wf, err := ParseFile(examplePath)
+func TestParseCronValidation(t *testing.T) {
+	valid := "name: cron-ok\ncron: \"*/10 * * * *\"\ntasks:\n  - id: t1\n    runtime: python\n    script: print(1)\n"
+	wf, err := Parse([]byte(valid))
 	if err != nil {
-		t.Fatalf("failed to parse example.yaml: %v", err)
+		t.Fatalf("unexpected error for valid cron: %v", err)
 	}
-	if len(wf.Tasks) != 2 {
-		t.Fatalf("expected 2 tasks in example.yaml, got %d", len(wf.Tasks))
+	if wf.Cron != "*/10 * * * *" {
+		t.Fatalf("expected cron preserved, got %q", wf.Cron)
+	}
+
+	invalid := "name: cron-bad\ncron: \"99 * * * *\"\ntasks:\n  - id: t1\n    runtime: python\n    script: print(1)\n"
+	if _, err := Parse([]byte(invalid)); err == nil {
+		t.Fatalf("expected error for invalid cron")
+	}
+}
+
+func TestParseFlowsDir(t *testing.T) {
+	flowsDir := filepath.Join("..", "..", "flows")
+	entries, err := LoadDir(flowsDir)
+	if err != nil {
+		t.Fatalf("LoadDir failed: %v", err)
+	}
+	if len(entries) < 2 {
+		t.Fatalf("expected at least 2 flows in %s, got %d", flowsDir, len(entries))
+	}
+	for _, entry := range entries {
+		if entry.ParseErr != nil {
+			t.Fatalf("flow %q failed to parse: %v", entry.FileName, entry.ParseErr)
+		}
+		if entry.Workflow == nil {
+			t.Fatalf("flow %q returned nil workflow", entry.FileName)
+		}
 	}
 }
