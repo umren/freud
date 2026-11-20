@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"freud/internal/db"
+	"freud/internal/workflow"
 )
 
 func TestUIServerRoutesAndSecurity(t *testing.T) {
@@ -136,5 +137,77 @@ func TestBuildDAGLayout(t *testing.T) {
 	}
 	if dag.Width <= 0 || dag.Height <= 0 {
 		t.Fatalf("invalid dimensions %dx%d", dag.Width, dag.Height)
+	}
+}
+
+type mockAsyncRunner struct {
+	store *db.Store
+}
+
+func (m *mockAsyncRunner) StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error) {
+	runID := "ui-run-001"
+	if err := m.store.CreateRunWithDefinition(ctx, runID, wf.Name, ""); err != nil {
+		return "", nil, err
+	}
+	ch := make(chan error, 1)
+	ch <- nil
+	close(ch)
+	return runID, ch, nil
+}
+
+func TestUIRunFlowNowAndRedirect(t *testing.T) {
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatalf("mkdir flows: %v", err)
+	}
+	flowYAML := "name: manual-flow\ntasks:\n  - id: step1\n    runtime: python\n    script: print(1)\n"
+	if err := os.WriteFile(filepath.Join(flowsDir, "manual.yaml"), []byte(flowYAML), 0o644); err != nil {
+		t.Fatalf("write flow: %v", err)
+	}
+
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	srv, err := NewServer(store, Config{
+		FlowsDir: flowsDir,
+		Runner:   &mockAsyncRunner{store: store},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	h := srv.Handler()
+
+	// Flow detail page must render the Run Now button.
+	detailReq := httptest.NewRequest(http.MethodGet, "/flows/manual.yaml", nil)
+	detailRec := httptest.NewRecorder()
+	h.ServeHTTP(detailRec, detailReq)
+	if detailRec.Code != http.StatusOK || !strings.Contains(detailRec.Body.String(), `/flows/manual.yaml/run`) {
+		t.Fatalf("expected Run Now form on flow detail, code=%d", detailRec.Code)
+	}
+
+	// POST /flows/manual.yaml/run must redirect 303 to /executions/<runID>.
+	runReq := httptest.NewRequest(http.MethodPost, "/flows/manual.yaml/run", nil)
+	runRec := httptest.NewRecorder()
+	h.ServeHTTP(runRec, runReq)
+	if runRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 See Other, got %d: %s", runRec.Code, runRec.Body.String())
+	}
+	loc := runRec.Header().Get("Location")
+	if loc != "/executions/ui-run-001" {
+		t.Fatalf("expected redirect to /executions/ui-run-001, got %q", loc)
+	}
+
+	srv.Wait()
+
+	// Immediately following the redirect must return 200 OK.
+	execReq := httptest.NewRequest(http.MethodGet, loc, nil)
+	execRec := httptest.NewRecorder()
+	h.ServeHTTP(execRec, execReq)
+	if execRec.Code != http.StatusOK || !strings.Contains(execRec.Body.String(), "manual-flow") {
+		t.Fatalf("expected 200 OK on %s, got %d", loc, execRec.Code)
 	}
 }

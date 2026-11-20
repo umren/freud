@@ -120,7 +120,7 @@ func runUICmd(args []string) error {
 	port := fs.Int("port", defaultUIPort, "HTTP port to serve the web UI")
 	flowsDir := fs.String("flows-dir", defaultFlowsDir, "Directory containing workflow YAML files")
 	includesDir := fs.String("includes-dir", defaultIncludesDir, "Directory containing shared include files")
-	envFile := fs.String("env-file", "", "Optional path to a .env file (used when --scheduler is enabled)")
+	envFile := fs.String("env-file", "", "Optional path to a .env file for UI-triggered and scheduled runs")
 	schedulerOn := fs.Bool("scheduler", false, "Enable background cron execution for scheduled flows")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -135,36 +135,40 @@ func runUICmd(args []string) error {
 	}
 	defer store.Close()
 
+	baseEnv, loadedFiles, err := loadEnvironment(*envFile, "")
+	if err != nil {
+		return err
+	}
+	if len(loadedFiles) > 0 {
+		fmt.Printf("[ui] Loaded %d env variable(s) from %s\n", len(baseEnv), strings.Join(loadedFiles, ", "))
+	}
+
+	dockerRunner, err := runner.NewDockerRunner()
+	if err != nil {
+		return err
+	}
+	defer dockerRunner.Close()
+
+	eng := engine.New(store, dockerRunner, workspacesDir)
+	eng.SetEnv(baseEnv)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	addr := fmt.Sprintf(":%d", *port)
 	uiServer, err := ui.NewServer(store, ui.Config{
 		Addr:        addr,
 		FlowsDir:    *flowsDir,
 		IncludesDir: *includesDir,
 		SchedulerOn: *schedulerOn,
+		Runner:      eng,
+		RunCtx:      ctx,
 	})
 	if err != nil {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	if *schedulerOn {
-		baseEnv, loadedFiles, err := loadEnvironment(*envFile, "")
-		if err != nil {
-			return err
-		}
-		if len(loadedFiles) > 0 {
-			fmt.Printf("[scheduler] Loaded %d env variable(s) from %s\n", len(baseEnv), strings.Join(loadedFiles, ", "))
-		}
-		dockerRunner, err := runner.NewDockerRunner()
-		if err != nil {
-			return err
-		}
-		defer dockerRunner.Close()
-
-		eng := engine.New(store, dockerRunner, workspacesDir)
-		eng.SetEnv(baseEnv)
 		go ui.StartScheduler(ctx, eng, *flowsDir)
 		fmt.Printf("[scheduler] Cron scheduler enabled (watching %s/)\n", *flowsDir)
 	}
@@ -190,7 +194,9 @@ func runUICmd(args []string) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return httpServer.Shutdown(shutdownCtx)
+		err := httpServer.Shutdown(shutdownCtx)
+		uiServer.Wait()
+		return err
 	}
 }
 

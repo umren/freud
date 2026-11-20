@@ -77,10 +77,10 @@ Start the embedded Web UI (default port `4321`):
 ./orchestrator ui --port 4321 --flows-dir flows --includes-dir includes --scheduler
 ```
 
-The Web UI exposes four pages (read-only views, no auth required locally):
+The Web UI exposes four pages (no auth required locally):
 - **Dashboard (`/`)**: execution counts, success rate, upcoming cron runs, and recent executions (auto-refreshes via HTMX).
-- **Flows (`/flows`)**: workflows discovered in `flows/`, cron schedules, SVG task topology, and read-only YAML source viewer.
-- **Executions (`/executions`)**: newest-to-oldest execution history with status filter, search, task logs, Gantt timeline, and execution topology.
+- **Flows (`/flows`)**: workflows discovered in `flows/`, cron schedules, SVG task topology, read-only YAML source viewer, and a **Run Now** button to trigger the flow immediately and jump to its live execution page.
+- **Executions (`/executions`)**: newest-to-oldest execution history with status filter, search, real-time streaming task logs, Gantt timeline, and execution topology.
 - **Includes (`/includes`)**: read-only file browser for `includes/`.
 
 Manage cached dependency images:

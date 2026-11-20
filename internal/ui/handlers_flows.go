@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ type flowDetailItem struct {
 type flowDetailViewData struct {
 	basePageData
 	Flow       flowDetailItem
+	CanRun     bool
 	NextRun    string
 	StartsIn   string
 	YAMLLines  []codeLine
@@ -114,32 +116,35 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleFlowDetail(w http.ResponseWriter, r *http.Request) {
-	fileName := r.PathValue("file")
+func (s *Server) findFlowEntry(w http.ResponseWriter, fileName string) (*workflow.WorkflowEntry, bool) {
 	if fileName == "" || strings.ContainsAny(fileName, "/\\") || fileName == "." || fileName == ".." {
-		http.NotFound(w, r)
-		return
+		http.NotFound(w, nil)
+		return nil, false
 	}
 
 	entries, err := workflow.LoadDir(s.cfg.FlowsDir)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, false
 	}
 
-	var matched *workflow.WorkflowEntry
 	for i := range entries {
 		if entries[i].FileName == fileName {
-			matched = &entries[i]
-			break
+			if entries[i].ParseErr != nil {
+				http.Error(w, fmt.Sprintf("invalid workflow %q: %v", fileName, entries[i].ParseErr), http.StatusBadRequest)
+				return nil, false
+			}
+			return &entries[i], true
 		}
 	}
-	if matched == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if matched.ParseErr != nil {
-		http.Error(w, fmt.Sprintf("invalid workflow %q: %v", fileName, matched.ParseErr), http.StatusBadRequest)
+
+	http.NotFound(w, nil)
+	return nil, false
+}
+
+func (s *Server) handleFlowDetail(w http.ResponseWriter, r *http.Request) {
+	matched, ok := s.findFlowEntry(w, r.PathValue("file"))
+	if !ok {
 		return
 	}
 
@@ -185,10 +190,45 @@ func (s *Server) handleFlowDetail(w http.ResponseWriter, r *http.Request) {
 			TaskCount: len(matched.Workflow.Tasks),
 			RawYAML:   matched.RawYAML,
 		},
+		CanRun:     s.runner != nil,
 		NextRun:    nextRun,
 		StartsIn:   startsIn,
 		YAMLLines:  HighlightWorkflowYAML(matched.RawYAML),
 		DAG:        BuildDAGLayout(dagInput),
 		RecentRuns: toRunRowViews(recentRaw, now),
 	})
+}
+
+func (s *Server) handleRunFlow(w http.ResponseWriter, r *http.Request) {
+	if s.runner == nil {
+		http.Error(w, "execution runner is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	matched, ok := s.findFlowEntry(w, r.PathValue("file"))
+	if !ok {
+		return
+	}
+
+	runID, doneCh, err := s.runner.StartAsync(s.runCtx, matched.Workflow)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("start workflow %q: %v", matched.Workflow.Name, err), http.StatusInternalServerError)
+		return
+	}
+
+	s.wg.Add(1)
+	go func(name, id string, ch <-chan error) {
+		defer s.wg.Done()
+		if runErr := <-ch; runErr != nil {
+			fmt.Fprintf(os.Stderr, "[ui] Manual run %s (%s) failed: %v\n", id, name, runErr)
+		}
+	}(matched.Workflow.Name, runID, doneCh)
+
+	target := "/executions/" + runID
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", target)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
 }

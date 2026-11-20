@@ -11,7 +11,14 @@
       {{end}}
     </p>
   </div>
-  <span class="badge badge-neutral">Read-Only</span>
+  <div class="toolbar">
+    <span class="badge badge-neutral">Read-Only</span>
+    {{if .CanRun}}
+    <form method="POST" action="/flows/{{.Flow.FileName}}/run" style="margin:0">
+      <button type="submit" class="btn btn-primary">▶ Run Now</button>
+    </form>
+    {{end}}
+  </div>
 </div>
 
 <div x-data="{ tab: 'yaml', copied: false }">

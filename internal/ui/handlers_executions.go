@@ -178,7 +178,7 @@ func (s *Server) buildExecutionDetailData(ctx context.Context, runID string) (ex
 			Duration:    formatDuration(dur),
 			OffsetPct:   fmt.Sprintf("%.2f", offset),
 			WidthPct:    fmt.Sprintf("%.2f", width),
-			SearchKey:   strings.ToLower(tr.TaskID + " " + tr.Status + " " + tr.Logs.String),
+			SearchKey:   strings.ToLower(tr.TaskID + " " + tr.Status),
 		})
 	}
 

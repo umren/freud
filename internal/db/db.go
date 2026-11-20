@@ -247,6 +247,19 @@ func (s *Store) CreateTaskRunWithMeta(ctx context.Context, runID, taskID, runtim
 	return id, nil
 }
 
+// UpdateTaskRunLogs persists incremental log output while a task run is in progress.
+func (s *Store) UpdateTaskRunLogs(ctx context.Context, taskRunID int64, logs string) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE task_runs SET logs = ? WHERE id = ?`,
+		logs, taskRunID,
+	)
+	if err != nil {
+		return fmt.Errorf("update task run %d logs: %w", taskRunID, err)
+	}
+	return nil
+}
+
 // FinishTaskRun records the final status, exit code, logs, and completion time of a task run.
 func (s *Store) FinishTaskRun(ctx context.Context, taskRunID int64, status string, exitCode int64, logs string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)

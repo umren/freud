@@ -143,9 +143,39 @@ func (r *DockerRunner) Close() error {
 	return r.cli.Close()
 }
 
+type liveBuffer struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	onLog func(string)
+}
+
+func (lb *liveBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	n, err := lb.buf.Write(p)
+	snapshot := lb.buf.String()
+	cb := lb.onLog
+	lb.mu.Unlock()
+
+	if cb != nil {
+		cb(snapshot)
+	}
+	return n, err
+}
+
+func (lb *liveBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.buf.String()
+}
+
 // RunTask writes the task script to the shared workspace, ensures the runtime/cache image exists,
 // executes the container, captures logs, and removes the container afterward.
 func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string, task workflow.Task) (*Result, error) {
+	return r.RunTaskStream(ctx, runID, hostWorkspace, task, nil)
+}
+
+// RunTaskStream executes a task container and invokes onLog with accumulated output in real time.
+func (r *DockerRunner) RunTaskStream(ctx context.Context, runID, hostWorkspace string, task workflow.Task, onLog func(string)) (*Result, error) {
 	spec, err := resolveRuntimeSpec(task)
 	if err != nil {
 		return nil, err
@@ -162,14 +192,16 @@ func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string,
 		return nil, fmt.Errorf("write script file %q: %w", hostScriptPath, err)
 	}
 
-	runImage, err := r.prepareRunImage(ctx, spec.Image, task)
+	liveBuf := &liveBuffer{onLog: onLog}
+
+	runImage, err := r.prepareRunImage(ctx, spec.Image, task, liveBuf)
 	if err != nil {
-		return nil, err
+		return &Result{ExitCode: -1, Logs: liveBuf.String()}, err
 	}
 
 	includeMounts, err := resolveIncludeMounts(task)
 	if err != nil {
-		return nil, err
+		return &Result{ExitCode: -1, Logs: liveBuf.String()}, err
 	}
 
 	mounts := make([]mount.Mount, 0, 1+len(includeMounts))
@@ -196,19 +228,22 @@ func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string,
 	containerName := fmt.Sprintf("orch-%s-%s", runID, task.ID)
 	created, err := r.cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, containerName)
 	if err != nil {
-		return nil, fmt.Errorf("create container for task %q: %w", task.ID, err)
+		return &Result{ExitCode: -1, Logs: liveBuf.String()}, fmt.Errorf("create container for task %q: %w", task.ID, err)
 	}
 
 	// Ensure the container is removed only after logs have been collected or on setup failure.
 	defer r.removeContainer(created.ID)
 
 	if err := r.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
-		return nil, fmt.Errorf("start container %q for task %q: %w", created.ID, task.ID, err)
+		return &Result{ExitCode: -1, Logs: liveBuf.String()}, fmt.Errorf("start container %q for task %q: %w", created.ID, task.ID, err)
 	}
 
-	exitCode, waitErr := r.waitContainer(ctx, created.ID)
+	logErrCh := r.streamContainerLogs(ctx, created.ID, liveBuf)
 
-	logs, logErr := r.readAndPrintLogs(created.ID)
+	exitCode, waitErr := r.waitContainer(ctx, created.ID)
+	logErr := <-logErrCh
+	logs := liveBuf.String()
+
 	if logErr != nil && waitErr == nil {
 		return &Result{ExitCode: exitCode, Logs: logs}, fmt.Errorf("read logs for task %q: %w", task.ID, logErr)
 	}
@@ -222,21 +257,21 @@ func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string,
 	}, nil
 }
 
-func (r *DockerRunner) prepareRunImage(ctx context.Context, baseImage string, task workflow.Task) (string, error) {
+func (r *DockerRunner) prepareRunImage(ctx context.Context, baseImage string, task workflow.Task, logOut io.Writer) (string, error) {
 	r.imageMu.Lock()
 	defer r.imageMu.Unlock()
 
-	baseInfo, err := r.ensureImage(ctx, baseImage)
+	baseInfo, err := r.ensureImage(ctx, baseImage, logOut)
 	if err != nil {
 		return "", err
 	}
 	if len(task.Dependencies) == 0 {
 		return baseImage, nil
 	}
-	return r.ensureDependencyImage(ctx, baseImage, baseInfo.ID, task)
+	return r.ensureDependencyImage(ctx, baseImage, baseInfo.ID, task, logOut)
 }
 
-func (r *DockerRunner) ensureImage(ctx context.Context, imageName string) (image.InspectResponse, error) {
+func (r *DockerRunner) ensureImage(ctx context.Context, imageName string, logOut io.Writer) (image.InspectResponse, error) {
 	info, err := r.cli.ImageInspect(ctx, imageName)
 	if err == nil {
 		return info, nil
@@ -245,7 +280,11 @@ func (r *DockerRunner) ensureImage(ctx context.Context, imageName string) (image
 		return image.InspectResponse{}, fmt.Errorf("inspect image %q: %w", imageName, err)
 	}
 
-	fmt.Printf("[runner] Image %s not found locally, pulling...\n", imageName)
+	msg := fmt.Sprintf("[runner] Image %s not found locally, pulling...\n", imageName)
+	fmt.Print(msg)
+	if logOut != nil {
+		_, _ = io.WriteString(logOut, msg)
+	}
 	pullStream, err := r.cli.ImagePull(ctx, imageName, image.PullOptions{})
 	if err != nil {
 		return image.InspectResponse{}, fmt.Errorf("pull image %q: %w", imageName, err)
@@ -283,27 +322,29 @@ func (r *DockerRunner) waitContainer(ctx context.Context, containerID string) (i
 	}
 }
 
-func (r *DockerRunner) readAndPrintLogs(containerID string) (string, error) {
-	logCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+func (r *DockerRunner) streamContainerLogs(ctx context.Context, containerID string, liveBuf *liveBuffer) <-chan error {
+	errCh := make(chan error, 1)
 
-	reader, err := r.cli.ContainerLogs(logCtx, containerID, container.LogsOptions{
+	reader, err := r.cli.ContainerLogs(ctx, containerID, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
+		Follow:     true,
 	})
 	if err != nil {
-		return "", err
+		errCh <- err
+		return errCh
 	}
-	defer reader.Close()
 
-	var combined bytes.Buffer
-	stdoutWriter := io.MultiWriter(os.Stdout, &combined)
-	stderrWriter := io.MultiWriter(os.Stderr, &combined)
+	stdoutWriter := io.MultiWriter(os.Stdout, liveBuf)
+	stderrWriter := io.MultiWriter(os.Stderr, liveBuf)
 
-	if _, err := stdcopy.StdCopy(stdoutWriter, stderrWriter, reader); err != nil {
-		return combined.String(), err
-	}
-	return combined.String(), nil
+	go func() {
+		defer reader.Close()
+		_, copyErr := stdcopy.StdCopy(stdoutWriter, stderrWriter, reader)
+		errCh <- copyErr
+	}()
+
+	return errCh
 }
 
 func (r *DockerRunner) removeContainer(containerID string) {

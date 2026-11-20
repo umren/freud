@@ -313,6 +313,18 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
   background: #232938;
 }
 
+.btn-primary {
+  background: var(--accent);
+  border-color: #8b5cf6;
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-primary:hover {
+  background: #6d28d9;
+  border-color: #a78bfa;
+}
+
 .tabs {
   display: flex;
   gap: 6px;

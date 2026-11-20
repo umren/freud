@@ -130,7 +130,7 @@ func createDockerfileTarContext(dockerfile string) (io.Reader, error) {
 	return &buf, nil
 }
 
-func (r *DockerRunner) ensureDependencyImage(ctx context.Context, baseImage, baseImageID string, task workflow.Task) (string, error) {
+func (r *DockerRunner) ensureDependencyImage(ctx context.Context, baseImage, baseImageID string, task workflow.Task, logOut io.Writer) (string, error) {
 	cacheTag := computeCacheTag(baseImageID, task.Runtime, task.Dependencies)
 
 	if !r.noCache {
@@ -161,7 +161,11 @@ func (r *DockerRunner) ensureDependencyImage(ctx context.Context, baseImage, bas
 	copy(sortedDeps, task.Dependencies)
 	sort.Strings(sortedDeps)
 
-	fmt.Printf("[runner] Building cached dependency image %s (from %s)...\n", cacheTag, baseImage)
+	msg := fmt.Sprintf("[runner] Building cached dependency image %s (from %s)...\n", cacheTag, baseImage)
+	fmt.Print(msg)
+	if logOut != nil {
+		_, _ = io.WriteString(logOut, msg)
+	}
 	buildResp, err := r.cli.ImageBuild(ctx, tarCtx, build.ImageBuildOptions{
 		Tags:        []string{cacheTag},
 		Dockerfile:  "Dockerfile",

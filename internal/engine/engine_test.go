@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"freud/internal/db"
 	"freud/internal/runner"
@@ -214,5 +215,87 @@ func TestEngineMergesIncludesAndBaseDir(t *testing.T) {
 	gotInc := mr.capturedIncludes["t1"]
 	if len(gotInc) != 2 || gotInc[0] != "includes/common.py" || gotInc[1] != "includes/extra.py" {
 		t.Fatalf("unexpected merged includes: %v", gotInc)
+	}
+}
+
+type streamingMockRunner struct {
+	startedCh chan struct{}
+	releaseCh chan struct{}
+}
+
+func (s *streamingMockRunner) RunTask(ctx context.Context, runID, hostWorkspace string, task workflow.Task) (*runner.Result, error) {
+	return s.RunTaskStream(ctx, runID, hostWorkspace, task, nil)
+}
+
+func (s *streamingMockRunner) RunTaskStream(_ context.Context, _ string, _ string, _ workflow.Task, onLog func(string)) (*runner.Result, error) {
+	if onLog != nil {
+		onLog("line 1 streaming\n")
+	}
+	close(s.startedCh)
+	<-s.releaseCh
+	if onLog != nil {
+		onLog("line 1 streaming\nline 2 done\n")
+	}
+	return &runner.Result{ExitCode: 0, Logs: "line 1 streaming\nline 2 done\n"}, nil
+}
+
+func TestEngineStartAsyncAndLiveLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tmpDir, "orchestrator.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	sr := &streamingMockRunner{
+		startedCh: make(chan struct{}),
+		releaseCh: make(chan struct{}),
+	}
+	eng := New(store, sr, filepath.Join(tmpDir, "workspaces"))
+
+	wf := &workflow.Workflow{
+		Name: "async-live-wf",
+		Tasks: []workflow.Task{
+			{ID: "t1", Runtime: workflow.RuntimePython, Script: "print(1)"},
+		},
+	}
+
+	runID, doneCh, err := eng.StartAsync(context.Background(), wf)
+	if err != nil {
+		t.Fatalf("StartAsync failed: %v", err)
+	}
+
+	// Run record must already exist synchronously before background goroutine completes.
+	rec, err := store.GetRun(context.Background(), runID)
+	if err != nil || rec.Status != db.StatusRunning {
+		t.Fatalf("expected immediate RUNNING record, got %+v, err=%v", rec, err)
+	}
+
+	<-sr.startedCh
+
+	// Wait briefly for the 250ms log flusher to persist partial output while task is still running.
+	deadline := time.Now().Add(2 * time.Second)
+	flushed := false
+	for time.Now().Before(deadline) {
+		tasks, err := store.ListTaskRuns(context.Background(), runID)
+		if err == nil && len(tasks) == 1 && tasks[0].Logs.String == "line 1 streaming\n" {
+			flushed = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	close(sr.releaseCh)
+
+	if !flushed {
+		t.Fatalf("expected live partial logs to flush while task was running")
+	}
+
+	if runErr := <-doneCh; runErr != nil {
+		t.Fatalf("async run failed: %v", runErr)
+	}
+
+	finalRec, err := store.GetRun(context.Background(), runID)
+	if err != nil || finalRec.Status != db.StatusSuccess {
+		t.Fatalf("expected final SUCCESS status, got %+v, err=%v", finalRec, err)
 	}
 }

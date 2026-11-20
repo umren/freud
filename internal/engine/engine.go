@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"freud/internal/db"
@@ -19,11 +20,18 @@ import (
 const (
 	defaultWorkspacesDir = "workspaces"
 	scriptsDirName       = ".scripts"
+	logFlushInterval     = 250 * time.Millisecond
 )
 
 // TaskRunner defines the execution backend for running a single workflow task.
 type TaskRunner interface {
 	RunTask(ctx context.Context, runID, hostWorkspace string, task workflow.Task) (*runner.Result, error)
+}
+
+// StreamingTaskRunner is an optional TaskRunner capability for real-time log streaming.
+type StreamingTaskRunner interface {
+	TaskRunner
+	RunTaskStream(ctx context.Context, runID, hostWorkspace string, task workflow.Task, onLog func(string)) (*runner.Result, error)
 }
 
 // Engine orchestrates workflow execution, workspace management, and SQLite state tracking.
@@ -53,27 +61,58 @@ func (e *Engine) SetEnv(baseEnv map[string]string) {
 
 // Run executes all tasks in the workflow in topological order and persists run metadata to SQLite.
 func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error) {
+	runID, hostWorkspace, orderedTasks, err := e.prepareRun(ctx, wf)
+	if err != nil {
+		return "", err
+	}
+	if err := e.executeRun(ctx, runID, hostWorkspace, wf, orderedTasks); err != nil {
+		return runID, err
+	}
+	return runID, nil
+}
+
+// StartAsync validates the workflow, creates the run record synchronously, and executes tasks asynchronously.
+// The returned channel receives the final execution error (or nil) once the run completes.
+func (e *Engine) StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error) {
+	runID, hostWorkspace, orderedTasks, err := e.prepareRun(ctx, wf)
+	if err != nil {
+		return "", nil, err
+	}
+
+	doneCh := make(chan error, 1)
+	go func() {
+		doneCh <- e.executeRun(ctx, runID, hostWorkspace, wf, orderedTasks)
+		close(doneCh)
+	}()
+	return runID, doneCh, nil
+}
+
+func (e *Engine) prepareRun(ctx context.Context, wf *workflow.Workflow) (string, string, []workflow.Task, error) {
 	orderedTasks, err := wf.TopologicalOrder()
 	if err != nil {
-		return "", fmt.Errorf("resolve execution order: %w", err)
+		return "", "", nil, fmt.Errorf("resolve execution order: %w", err)
 	}
 
 	runID, err := generateRunID()
 	if err != nil {
-		return "", fmt.Errorf("generate run id: %w", err)
+		return "", "", nil, fmt.Errorf("generate run id: %w", err)
 	}
 
 	hostWorkspace := filepath.Join(e.workspacesBase, runID)
 	scriptsDir := filepath.Join(hostWorkspace, scriptsDirName)
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
-		return "", fmt.Errorf("create workspace directory %q: %w", scriptsDir, err)
+		return "", "", nil, fmt.Errorf("create workspace directory %q: %w", scriptsDir, err)
 	}
 
 	defJSON := marshalWorkflowSnapshot(wf)
 	if err := e.store.CreateRunWithDefinition(ctx, runID, wf.Name, defJSON); err != nil {
-		return "", fmt.Errorf("record workflow run start: %w", err)
+		return "", "", nil, fmt.Errorf("record workflow run start: %w", err)
 	}
 
+	return runID, hostWorkspace, orderedTasks, nil
+}
+
+func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf *workflow.Workflow, orderedTasks []workflow.Task) error {
 	fmt.Printf("[engine] Starting workflow %q (run_id=%s, workspace=%s)\n", wf.Name, runID, hostWorkspace)
 
 	for _, task := range orderedTasks {
@@ -86,7 +125,7 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 		taskRunID, err := e.store.CreateTaskRunWithMeta(ctx, runID, task.ID, task.Runtime, task.Image)
 		if err != nil {
 			e.markRunFailed(runID)
-			return runID, fmt.Errorf("record task %q start: %w", task.ID, err)
+			return fmt.Errorf("record task %q start: %w", task.ID, err)
 		}
 
 		execTask := task
@@ -100,7 +139,7 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 			}
 		}
 
-		res, runErr := e.runner.RunTask(ctx, runID, hostWorkspace, execTask)
+		res, runErr := e.runTaskWithLiveLogs(ctx, runID, hostWorkspace, taskRunID, execTask)
 
 		var exitCode int64 = -1
 		var logs string
@@ -122,25 +161,81 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 
 			fmt.Printf("[engine] Task %q FAILED (exit_code=%d). Aborting workflow.\n", task.ID, exitCode)
 			if runErr != nil {
-				return runID, fmt.Errorf("task %q failed: %w", task.ID, runErr)
+				return fmt.Errorf("task %q failed: %w", task.ID, runErr)
 			}
-			return runID, fmt.Errorf("task %q exited with non-zero code %d", task.ID, exitCode)
+			return fmt.Errorf("task %q exited with non-zero code %d", task.ID, exitCode)
 		}
 
 		if err := e.store.FinishTaskRun(ctx, taskRunID, db.StatusSuccess, exitCode, logs); err != nil {
 			e.markRunFailed(runID)
-			return runID, fmt.Errorf("record task %q completion: %w", task.ID, err)
+			return fmt.Errorf("record task %q completion: %w", task.ID, err)
 		}
 
 		fmt.Printf("[engine] Task %q SUCCEEDED (exit_code=%d)\n", task.ID, exitCode)
 	}
 
 	if err := e.store.FinishRun(ctx, runID, db.StatusSuccess); err != nil {
-		return runID, fmt.Errorf("record workflow run completion: %w", err)
+		return fmt.Errorf("record workflow run completion: %w", err)
 	}
 
 	fmt.Printf("[engine] Workflow %q (run_id=%s) SUCCEEDED\n", wf.Name, runID)
-	return runID, nil
+	return nil
+}
+
+func (e *Engine) runTaskWithLiveLogs(ctx context.Context, runID, hostWorkspace string, taskRunID int64, task workflow.Task) (*runner.Result, error) {
+	sr, ok := e.runner.(StreamingTaskRunner)
+	if !ok {
+		return e.runner.RunTask(ctx, runID, hostWorkspace, task)
+	}
+
+	var (
+		mu      sync.Mutex
+		latest  string
+		dirty   bool
+		stopCh  = make(chan struct{})
+		doneCh  = make(chan struct{})
+	)
+
+	go func() {
+		defer close(doneCh)
+		ticker := time.NewTicker(logFlushInterval)
+		defer ticker.Stop()
+
+		flush := func() {
+			mu.Lock()
+			if !dirty {
+				mu.Unlock()
+				return
+			}
+			snapshot := latest
+			dirty = false
+			mu.Unlock()
+
+			dbCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = e.store.UpdateTaskRunLogs(dbCtx, taskRunID, snapshot)
+			cancel()
+		}
+
+		for {
+			select {
+			case <-stopCh:
+				flush()
+				return
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+
+	res, err := sr.RunTaskStream(ctx, runID, hostWorkspace, task, func(snapshot string) {
+		mu.Lock()
+		latest = snapshot
+		dirty = true
+		mu.Unlock()
+	})
+	close(stopCh)
+	<-doneCh
+	return res, err
 }
 
 func (e *Engine) markTaskFinished(taskRunID int64, status string, exitCode int64, logs string) {
@@ -162,9 +257,9 @@ func (e *Engine) markRunFailed(runID string) {
 }
 
 type runDefinitionSnapshot struct {
-	Name  string             `json:"name"`
-	Cron  string             `json:"cron,omitempty"`
-	Tasks []taskDefSnapshot  `json:"tasks"`
+	Name  string            `json:"name"`
+	Cron  string            `json:"cron,omitempty"`
+	Tasks []taskDefSnapshot `json:"tasks"`
 }
 
 type taskDefSnapshot struct {

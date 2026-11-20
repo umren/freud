@@ -1,17 +1,25 @@
 package ui
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"net/http"
+	"sync"
 
 	"freud/internal/db"
+	"freud/internal/workflow"
 )
 
 //go:embed static templates
 var embeddedFS embed.FS
+
+// AsyncFlowRunner starts workflows asynchronously after synchronously creating the run record.
+type AsyncFlowRunner interface {
+	StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error)
+}
 
 // Config configures the embedded web UI server.
 type Config struct {
@@ -19,12 +27,17 @@ type Config struct {
 	FlowsDir    string
 	IncludesDir string
 	SchedulerOn bool
+	Runner      AsyncFlowRunner
+	RunCtx      context.Context
 }
 
 // Server serves the embedded Kestra-inspired web UI over HTTP.
 type Server struct {
 	store     *db.Store
 	cfg       Config
+	runner    AsyncFlowRunner
+	runCtx    context.Context
+	wg        sync.WaitGroup
 	pages     map[string]*template.Template
 	partials  *template.Template
 	staticHnd http.Handler
@@ -48,6 +61,10 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 	}
 	if cfg.IncludesDir == "" {
 		cfg.IncludesDir = "includes"
+	}
+	runCtx := cfg.RunCtx
+	if runCtx == nil {
+		runCtx = context.Background()
 	}
 
 	pageFiles := map[string][]string{
@@ -87,6 +104,8 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 	return &Server{
 		store:     store,
 		cfg:       cfg,
+		runner:    cfg.Runner,
+		runCtx:    runCtx,
 		pages:     pages,
 		partials:  partials,
 		staticHnd: http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))),
@@ -101,12 +120,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /partials/dashboard", s.handleDashboardPartial)
 	mux.HandleFunc("GET /flows", s.handleFlows)
 	mux.HandleFunc("GET /flows/{file}", s.handleFlowDetail)
+	mux.HandleFunc("POST /flows/{file}/run", s.handleRunFlow)
 	mux.HandleFunc("GET /executions", s.handleExecutions)
 	mux.HandleFunc("GET /partials/executions", s.handleExecutionsPartial)
 	mux.HandleFunc("GET /executions/{id}", s.handleExecutionDetail)
 	mux.HandleFunc("GET /partials/executions/{id}", s.handleExecutionDetailPartial)
 	mux.HandleFunc("GET /includes", s.handleIncludes)
 	return mux
+}
+
+// Wait blocks until all manually triggered UI runs finish.
+func (s *Server) Wait() {
+	s.wg.Wait()
 }
 
 func (s *Server) newBaseData(title, nav string, runningCount int) basePageData {
