@@ -11,7 +11,7 @@ A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype
   - `js` (default `oven/bun:latest`, or any custom image such as `oven/bun:1.2`, `node:22-alpine`)
   - `shell` (or omit `runtime` when `image` is specified, e.g. `alpine:3.20`)
 - **Automatic image pulling & dependency caching**: checks local Docker images, pulls missing ones with live progress, and builds cached Docker image layers (`orchestrator-cache:<hash>`) for tasks with `dependencies` so subsequent runs start immediately without reinstalling packages.
-- **Shared per-run workspace**: creates `./workspaces/<run_id>` on the host and mounts it at `/workspace` inside every task container.
+- **Shared per-run workspace & read-only includes**: creates `./workspaces/<run_id>` on the host (mounted at `/workspace`) and mounts external helper modules/configs from `includes/` (or explicit `include:` paths) read-only at `/includes` with zero file copying.
 - **Reliable log & status capture**: disables `AutoRemove`, waits for container completion, demultiplexes stdout/stderr, prints output, stores logs and exit codes in SQLite, and then removes the container.
 - **Fail-fast execution**: stops the pipeline immediately if a task exits with a non-zero status, marking both the task and the workflow run as `FAILED`.
 - **SQLite persistence (`orchestrator.db`)**: configured with `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;`.
@@ -85,13 +85,15 @@ You can interrupt a running workflow with `Ctrl+C` (`SIGINT`/`SIGTERM`), which c
 
 The included [`example.yaml`](example.yaml) demonstrates file-based data exchange between two runtimes:
 
-1. **`extract`** (`runtime: python`, `image: python:3.13-slim`, `dependencies: [pydantic, pyyaml]`): installs `pydantic` and `pyyaml`, reads variables from `.env`, validates the payload with `pydantic`, prints a YAML summary, and writes `/workspace/payload.json`.
-2. **`transform`** (`runtime: js`, `depends_on: [extract]`, `dependencies: [lodash-es, ms]`): installs `lodash-es` and `ms`, reads `/workspace/payload.json`, computes the sum (`102`) with `lodash-es`, and prints the `.env` variables and result to stdout.
+1. **`extract`** (`runtime: python`, `image: python:3.13-slim`, `dependencies: [pydantic, pyyaml]`, `include: [includes/payload_utils.py]`): installs `pydantic` and `pyyaml`, imports `payload_utils` from `/includes` via `PYTHONPATH`, reads variables from `.env`, prints a YAML summary, and writes `/workspace/payload.json`.
+2. **`transform`** (`runtime: js`, `depends_on: [extract]`, `dependencies: [lodash-es, ms]`, `include: [includes/math_utils.ts]`): installs `lodash-es` and `ms`, imports `formatStats` from `/includes/math_utils.ts`, reads `/workspace/payload.json`, computes the sum (`102`) with `lodash-es`, and prints the `.env` variables and stats to stdout.
 
 ## Workflow YAML Specification
 
 ```yaml
 name: my-pipeline
+include:                      # optional workflow-wide read-only files/dirs mounted under /includes
+  - includes/shared.py
 tasks:
   - id: step_one
     runtime: python           # "python", "js", or "shell" (optional if image is set)
@@ -99,9 +101,12 @@ tasks:
     dependencies:             # optional packages installed in the task container
       - pydantic
       - pyyaml
+    include:                  # optional per-task read-only files/dirs mounted under /includes
+      - includes/payload_utils.py
     env:                      # optional key-value environment variables
       MY_VAR: "value"
     script: |
+      from payload_utils import build_payload
       print("Hello from Python 3.13")
 
   - id: step_two
@@ -110,7 +115,10 @@ tasks:
       - step_one
     dependencies:
       - lodash-es
+    include:
+      - includes/math_utils.ts
     script: |
+      import { formatStats } from "/includes/math_utils.ts";
       console.log("Hello from Bun");
 
   - id: step_three
@@ -118,8 +126,15 @@ tasks:
     depends_on:
       - step_two
     script: |
-      ls -la /workspace
+      ls -la /workspace /includes
 ```
+
+### Included Files (`/includes`)
+
+- **Zero-copy read-only mounts**: included paths are bind-mounted with `ReadOnly: true` under `/includes` (never copied into `./workspaces/<run_id>`), so high-throughput workflows (1,000+ runs/day) incur zero extra disk copying.
+- **Auto-discovery**: if neither workflow nor task specifies `include:`, and an `includes/` directory exists next to the workflow YAML, it is automatically mounted read-only at `/includes`.
+- **Python imports**: `PYTHONPATH=/workspace:/includes` is set automatically for `python` tasks (unless overridden in `env:`), allowing direct `import <module>` from `/includes`.
+- **Path mapping**: paths under `includes/...` map to `/includes/...` (e.g. `includes/math_utils.ts` → `/includes/math_utils.ts`); other relative paths map to `/includes/<path>`.
 
 ### Validation Rules
 
@@ -129,6 +144,7 @@ tasks:
 - `runtime` must be `"python"`, `"js"`, or `"shell"` (if omitted, `image` must be set and `runtime` defaults to `"shell"`).
 - `image` is optional for `python` and `js`, required for `shell`, and must not contain whitespace.
 - `dependencies` is optional for `python` and `js` (not supported on `shell`); entries must be non-empty.
+- `include` paths must be relative and stay inside the workflow directory (no `..` traversal).
 - `script` must be non-empty.
 - Every entry in `depends_on` must reference an existing task `id`, cannot reference itself, and the resulting graph must be acyclic.
 

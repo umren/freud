@@ -3,6 +3,7 @@ package workflow
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -16,8 +17,10 @@ const (
 
 // Workflow represents a parsed YAML pipeline definition.
 type Workflow struct {
-	Name  string `yaml:"name"`
-	Tasks []Task `yaml:"tasks"`
+	Name    string   `yaml:"name"`
+	Include []string `yaml:"include,omitempty"`
+	Tasks   []Task   `yaml:"tasks"`
+	BaseDir string   `yaml:"-"`
 }
 
 // Task represents a single unit of execution within a workflow.
@@ -26,18 +29,29 @@ type Task struct {
 	Runtime      string            `yaml:"runtime,omitempty"`
 	Image        string            `yaml:"image,omitempty"`
 	Dependencies []string          `yaml:"dependencies,omitempty"`
+	Include      []string          `yaml:"include,omitempty"`
 	DependsOn    []string          `yaml:"depends_on,omitempty"`
 	Env          map[string]string `yaml:"env,omitempty"`
 	Script       string            `yaml:"script"`
+	BaseDir      string            `yaml:"-"`
 }
 
 // ParseFile reads and validates a workflow YAML file from disk.
 func ParseFile(path string) (*Workflow, error) {
-	data, err := os.ReadFile(path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workflow path %q: %w", path, err)
+	}
+	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("read workflow file %q: %w", path, err)
 	}
-	return Parse(data)
+	wf, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	wf.BaseDir = filepath.Dir(absPath)
+	return wf, nil
 }
 
 // Parse unmarshals YAML bytes into a Workflow and validates its structure and DAG.
@@ -45,6 +59,9 @@ func Parse(data []byte) (*Workflow, error) {
 	var wf Workflow
 	if err := yaml.Unmarshal(data, &wf); err != nil {
 		return nil, fmt.Errorf("parse workflow YAML: %w", err)
+	}
+	if wf.BaseDir == "" {
+		wf.BaseDir = "."
 	}
 	if err := wf.Validate(); err != nil {
 		return nil, err
@@ -59,6 +76,9 @@ func (w *Workflow) Validate() error {
 	}
 	if len(w.Tasks) == 0 {
 		return fmt.Errorf("workflow %q must define at least one task", w.Name)
+	}
+	if err := validateIncludePaths(w.Include); err != nil {
+		return fmt.Errorf("workflow %q: %w", w.Name, err)
 	}
 
 	taskByID := make(map[string]Task, len(w.Tasks))
@@ -105,6 +125,10 @@ func (w *Workflow) Validate() error {
 				return fmt.Errorf("task %q dependency at index %d is invalid", t.ID, j)
 			}
 			t.Dependencies[j] = trimmed
+		}
+
+		if err := validateIncludePaths(t.Include); err != nil {
+			return fmt.Errorf("task %q: %w", t.ID, err)
 		}
 
 		if strings.TrimSpace(t.Script) == "" {
@@ -197,6 +221,24 @@ func validateTaskID(id string) error {
 	}
 	if strings.ContainsAny(id, "/\\ \t\r\n") {
 		return fmt.Errorf("task id %q must not contain whitespace or path separators", id)
+	}
+	return nil
+}
+
+func validateIncludePaths(paths []string) error {
+	for i, raw := range paths {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || strings.ContainsAny(trimmed, "\r\n") {
+			return fmt.Errorf("include path at index %d is empty", i)
+		}
+		if filepath.IsAbs(trimmed) || strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "\\") {
+			return fmt.Errorf("include path %q must be relative", raw)
+		}
+		clean := filepath.ToSlash(filepath.Clean(trimmed))
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("include path %q must stay inside the workflow directory", raw)
+		}
+		paths[i] = clean
 	}
 	return nil
 }

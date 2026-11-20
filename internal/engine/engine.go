@@ -89,6 +89,14 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 
 		execTask := task
 		execTask.Env = env.MergeTaskEnv(e.baseEnv, task.Env)
+		execTask.Include = mergeIncludes(wf.Include, task.Include)
+		if execTask.BaseDir == "" {
+			if wf.BaseDir != "" {
+				execTask.BaseDir = wf.BaseDir
+			} else {
+				execTask.BaseDir = "."
+			}
+		}
 
 		res, runErr := e.runner.RunTask(ctx, runID, hostWorkspace, execTask)
 
@@ -149,6 +157,27 @@ func (e *Engine) markRunFailed(runID string) {
 	if err := e.store.FinishRun(dbCtx, runID, db.StatusFailed); err != nil {
 		fmt.Fprintf(os.Stderr, "[engine] Warning: failed to persist run %s FAILED status: %v\n", runID, err)
 	}
+}
+
+func mergeIncludes(workflowIncludes, taskIncludes []string) []string {
+	if len(workflowIncludes) == 0 && len(taskIncludes) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(workflowIncludes)+len(taskIncludes))
+	merged := make([]string, 0, len(workflowIncludes)+len(taskIncludes))
+	for _, p := range workflowIncludes {
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			merged = append(merged, p)
+		}
+	}
+	for _, p := range taskIncludes {
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			merged = append(merged, p)
+		}
+	}
+	return merged
 }
 
 func generateRunID() (string, error) {

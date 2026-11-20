@@ -3,6 +3,8 @@ package runner
 import (
 	"archive/tar"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -150,5 +152,113 @@ func TestBuildCacheDockerfileAndTarContext(t *testing.T) {
 	}
 	if string(content) != pyDF {
 		t.Fatalf("tar Dockerfile content mismatch")
+	}
+}
+
+func TestResolveIncludeMounts(t *testing.T) {
+	baseDir := t.TempDir()
+	includesDir := filepath.Join(baseDir, "includes")
+	configsDir := filepath.Join(baseDir, "configs")
+	if err := os.MkdirAll(includesDir, 0o755); err != nil {
+		t.Fatalf("mkdir includes: %v", err)
+	}
+	if err := os.MkdirAll(configsDir, 0o755); err != nil {
+		t.Fatalf("mkdir configs: %v", err)
+	}
+	helperFile := filepath.Join(includesDir, "helpers.py")
+	cfgFile := filepath.Join(configsDir, "app.json")
+	if err := os.WriteFile(helperFile, []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	if err := os.WriteFile(cfgFile, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Run("auto-mounts includes directory when include is empty", func(t *testing.T) {
+		mounts, err := resolveIncludeMounts(workflow.Task{
+			ID:      "t1",
+			BaseDir: baseDir,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(mounts) != 1 || mounts[0].Target != "/includes" || !mounts[0].ReadOnly {
+			t.Fatalf("unexpected mounts: %+v", mounts)
+		}
+	})
+
+	t.Run("explicit includes map cleanly and stay read-only", func(t *testing.T) {
+		mounts, err := resolveIncludeMounts(workflow.Task{
+			ID:      "t2",
+			BaseDir: baseDir,
+			Include: []string{"includes/helpers.py", "configs/app.json"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(mounts) != 2 {
+			t.Fatalf("expected 2 mounts, got %d: %+v", len(mounts), mounts)
+		}
+		if mounts[0].Target != "/includes/configs/app.json" && mounts[1].Target != "/includes/configs/app.json" {
+			t.Fatalf("expected /includes/configs/app.json mount, got %+v", mounts)
+		}
+		if mounts[0].Target != "/includes/helpers.py" && mounts[1].Target != "/includes/helpers.py" {
+			t.Fatalf("expected /includes/helpers.py mount, got %+v", mounts)
+		}
+		for _, m := range mounts {
+			if !m.ReadOnly {
+				t.Fatalf("expected ReadOnly mount, got %+v", m)
+			}
+		}
+	})
+
+	t.Run("parent dir mount suppresses overlapping child mount", func(t *testing.T) {
+		mounts, err := resolveIncludeMounts(workflow.Task{
+			ID:      "t3",
+			BaseDir: baseDir,
+			Include: []string{"includes/helpers.py", "includes"},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(mounts) != 1 || mounts[0].Target != "/includes" {
+			t.Fatalf("expected single /includes mount, got %+v", mounts)
+		}
+	})
+
+	t.Run("missing include returns error", func(t *testing.T) {
+		_, err := resolveIncludeMounts(workflow.Task{
+			ID:      "t4",
+			BaseDir: baseDir,
+			Include: []string{"includes/missing.py"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "does not exist") {
+			t.Fatalf("expected does not exist error, got %v", err)
+		}
+	})
+}
+
+func TestBuildTaskEnvPythonPath(t *testing.T) {
+	pyEnv := buildTaskEnv(workflow.Task{
+		Runtime: workflow.RuntimePython,
+		Env:     map[string]string{"FOO": "bar"},
+	})
+	if pyEnv["PYTHONPATH"] != "/workspace:/includes" {
+		t.Fatalf("expected PYTHONPATH=/workspace:/includes, got %q", pyEnv["PYTHONPATH"])
+	}
+
+	customPyEnv := buildTaskEnv(workflow.Task{
+		Runtime: workflow.RuntimePython,
+		Env:     map[string]string{"PYTHONPATH": "/custom/lib"},
+	})
+	if customPyEnv["PYTHONPATH"] != "/custom/lib" {
+		t.Fatalf("expected user PYTHONPATH preserved, got %q", customPyEnv["PYTHONPATH"])
+	}
+
+	jsEnv := buildTaskEnv(workflow.Task{
+		Runtime: workflow.RuntimeJS,
+	})
+	if _, exists := jsEnv["PYTHONPATH"]; exists {
+		t.Fatalf("did not expect PYTHONPATH for JS task")
 	}
 }

@@ -12,10 +12,12 @@ import (
 )
 
 type mockRunner struct {
-	executed     []string
-	capturedEnvs map[string]map[string]string
-	failTask     string
-	exitCode     int64
+	executed         []string
+	capturedEnvs     map[string]map[string]string
+	capturedIncludes map[string][]string
+	capturedBaseDirs map[string]string
+	failTask         string
+	exitCode         int64
 }
 
 func (m *mockRunner) RunTask(_ context.Context, _ string, hostWorkspace string, task workflow.Task) (*runner.Result, error) {
@@ -23,7 +25,15 @@ func (m *mockRunner) RunTask(_ context.Context, _ string, hostWorkspace string, 
 	if m.capturedEnvs == nil {
 		m.capturedEnvs = make(map[string]map[string]string)
 	}
+	if m.capturedIncludes == nil {
+		m.capturedIncludes = make(map[string][]string)
+	}
+	if m.capturedBaseDirs == nil {
+		m.capturedBaseDirs = make(map[string]string)
+	}
 	m.capturedEnvs[task.ID] = task.Env
+	m.capturedIncludes[task.ID] = task.Include
+	m.capturedBaseDirs[task.ID] = task.BaseDir
 
 	scriptsDir := filepath.Join(hostWorkspace, ".scripts")
 	if _, err := os.Stat(scriptsDir); err != nil {
@@ -166,5 +176,43 @@ func TestEngineInjectsBaseEnv(t *testing.T) {
 	t2Env := mr.capturedEnvs["t2"]
 	if t2Env["SHARED_SECRET"] != "top-secret" || t2Env["ENV_NAME"] != "dev" {
 		t.Fatalf("unexpected t2 env: %+v", t2Env)
+	}
+}
+
+func TestEngineMergesIncludesAndBaseDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tmpDir, "orchestrator.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	mr := &mockRunner{}
+	eng := New(store, mr, filepath.Join(tmpDir, "workspaces"))
+
+	wf := &workflow.Workflow{
+		Name:    "inc-wf",
+		BaseDir: "/tmp/wfdir",
+		Include: []string{"includes/common.py"},
+		Tasks: []workflow.Task{
+			{
+				ID:      "t1",
+				Runtime: workflow.RuntimePython,
+				Include: []string{"includes/common.py", "includes/extra.py"},
+				Script:  "print(1)",
+			},
+		},
+	}
+
+	if _, err := eng.Run(context.Background(), wf); err != nil {
+		t.Fatalf("engine run failed: %v", err)
+	}
+
+	if mr.capturedBaseDirs["t1"] != "/tmp/wfdir" {
+		t.Fatalf("expected BaseDir /tmp/wfdir, got %q", mr.capturedBaseDirs["t1"])
+	}
+	gotInc := mr.capturedIncludes["t1"]
+	if len(gotInc) != 2 || gotInc[0] != "includes/common.py" || gotInc[1] != "includes/extra.py" {
+		t.Fatalf("unexpected merged includes: %v", gotInc)
 	}
 }

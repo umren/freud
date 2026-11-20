@@ -6,19 +6,15 @@ tasks:
     dependencies:
       - pydantic
       - pyyaml
+    include:
+      - includes/payload_utils.py
     env:
       TASK_AUTH: "Bearer ${API_TOKEN}"
     script: |
       import json
       import os
       import yaml
-      from pydantic import BaseModel
-
-      class Payload(BaseModel):
-          message: str
-          env: str
-          source: str
-          numbers: list[int]
+      from payload_utils import build_payload
 
       pipeline_env = os.environ.get("PIPELINE_ENV", "unknown")
       source_label = os.environ.get("SOURCE_LABEL", "default")
@@ -30,7 +26,7 @@ tasks:
       print(f"[extract] API_TOKEN={api_token}")
       print(f"[extract] TASK_AUTH={task_auth}")
 
-      payload = Payload(
+      payload = build_payload(
           message="Hello from Python extract task",
           env=pipeline_env,
           source=source_label,
@@ -53,10 +49,13 @@ tasks:
     dependencies:
       - lodash-es
       - ms
+    include:
+      - includes/math_utils.ts
     script: |
       import { readFileSync } from "fs";
       import { sum } from "lodash-es";
       import ms from "ms";
+      import { formatStats } from "/includes/math_utils.ts";
 
       const raw = readFileSync("/workspace/payload.json", "utf-8");
       const data = JSON.parse(raw);
@@ -70,5 +69,5 @@ tasks:
       console.log(`Message: ${data.message}`);
       console.log(`Source: ${data.source}`);
       console.log(`Numbers: ${JSON.stringify(numbers)}`);
-      console.log(`Sum: ${total}`);
+      console.log(formatStats(numbers, total));
       console.log(`Window: ${ms("2h")}`);

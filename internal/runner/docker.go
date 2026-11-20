@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -26,7 +28,9 @@ const (
 	defaultJSImage     = "oven/bun:latest"
 
 	containerWorkspaceDir = "/workspace"
+	containerIncludesDir  = "/includes"
 	scriptsSubdir         = ".scripts"
+	defaultIncludesSubdir = "includes"
 )
 
 // Result holds the execution outcome of a single task container.
@@ -169,23 +173,30 @@ func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string,
 		}
 	}
 
+	includeMounts, err := resolveIncludeMounts(task)
+	if err != nil {
+		return nil, err
+	}
+
+	mounts := make([]mount.Mount, 0, 1+len(includeMounts))
+	mounts = append(mounts, mount.Mount{
+		Type:   mount.TypeBind,
+		Source: absWorkspace,
+		Target: containerWorkspaceDir,
+	})
+	mounts = append(mounts, includeMounts...)
+
 	containerScriptPath := containerWorkspaceDir + "/" + scriptsSubdir + "/" + scriptFilename
 	cfg := &container.Config{
 		Image:      runImage,
 		Cmd:        spec.Command(containerScriptPath),
-		Env:        formatEnv(task.Env),
+		Env:        formatEnv(buildTaskEnv(task)),
 		WorkingDir: containerWorkspaceDir,
 		Tty:        false,
 	}
 	hostCfg := &container.HostConfig{
 		AutoRemove: false,
-		Mounts: []mount.Mount{
-			{
-				Type:   mount.TypeBind,
-				Source: absWorkspace,
-				Target: containerWorkspaceDir,
-			},
-		},
+		Mounts:     mounts,
 	}
 
 	containerName := fmt.Sprintf("orch-%s-%s", runID, task.ID)
@@ -294,6 +305,137 @@ func (r *DockerRunner) removeContainer(containerID string) {
 	if err := r.cli.ContainerRemove(rmCtx, containerID, container.RemoveOptions{Force: true}); err != nil {
 		fmt.Fprintf(os.Stderr, "[runner] Warning: failed to remove container %s: %v\n", containerID, err)
 	}
+}
+
+func buildTaskEnv(task workflow.Task) map[string]string {
+	merged := make(map[string]string, len(task.Env)+1)
+	for k, v := range task.Env {
+		merged[k] = v
+	}
+	if task.Runtime == workflow.RuntimePython {
+		if _, exists := merged["PYTHONPATH"]; !exists {
+			merged["PYTHONPATH"] = containerWorkspaceDir + ":" + containerIncludesDir
+		}
+	}
+	return merged
+}
+
+func resolveIncludeMounts(task workflow.Task) ([]mount.Mount, error) {
+	baseDir := task.BaseDir
+	if baseDir == "" {
+		baseDir = "."
+	}
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workflow base directory %q: %w", baseDir, err)
+	}
+
+	if len(task.Include) == 0 {
+		defaultDir := filepath.Join(absBase, defaultIncludesSubdir)
+		info, err := os.Stat(defaultDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("inspect default includes directory %q: %w", defaultDir, err)
+		}
+		if !info.IsDir() {
+			return nil, nil
+		}
+		return []mount.Mount{
+			{
+				Type:     mount.TypeBind,
+				Source:   defaultDir,
+				Target:   containerIncludesDir,
+				ReadOnly: true,
+			},
+		}, nil
+	}
+
+	type candidate struct {
+		source string
+		target string
+		isDir  bool
+	}
+
+	candidates := make([]candidate, 0, len(task.Include))
+	for _, rel := range task.Include {
+		cleanRel := filepath.ToSlash(filepath.Clean(strings.TrimSpace(rel)))
+		if filepath.IsAbs(cleanRel) || cleanRel == "." || cleanRel == ".." || strings.HasPrefix(cleanRel, "../") {
+			return nil, fmt.Errorf("invalid include path %q for task %q", rel, task.ID)
+		}
+
+		absSource := filepath.Join(absBase, filepath.FromSlash(cleanRel))
+		relCheck, err := filepath.Rel(absBase, absSource)
+		if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("include path %q escapes base directory", rel)
+		}
+
+		info, err := os.Stat(absSource)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("include path %q for task %q does not exist", rel, task.ID)
+			}
+			return nil, fmt.Errorf("stat include path %q: %w", rel, err)
+		}
+
+		target := containerIncludesDir + "/" + cleanRel
+		if cleanRel == defaultIncludesSubdir {
+			target = containerIncludesDir
+		} else if strings.HasPrefix(cleanRel, defaultIncludesSubdir+"/") {
+			target = containerIncludesDir + "/" + strings.TrimPrefix(cleanRel, defaultIncludesSubdir+"/")
+		}
+
+		candidates = append(candidates, candidate{
+			source: absSource,
+			target: path.Clean(target),
+			isDir:  info.IsDir(),
+		})
+	}
+
+	// Sort shorter parent paths first so directory mounts suppress overlapping child mounts.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return len(candidates[i].target) < len(candidates[j].target)
+	})
+
+	mounts := make([]mount.Mount, 0, len(candidates))
+	seenTargets := make(map[string]struct{}, len(candidates))
+	mountedDirs := make(map[string]struct{}, len(candidates))
+
+	for _, c := range candidates {
+		if _, dup := seenTargets[c.target]; dup {
+			continue
+		}
+		if isCoveredByMountedDir(c.target, mountedDirs) {
+			continue
+		}
+		seenTargets[c.target] = struct{}{}
+		if c.isDir {
+			mountedDirs[c.target] = struct{}{}
+		}
+		mounts = append(mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   c.source,
+			Target:   c.target,
+			ReadOnly: true,
+		})
+	}
+
+	return mounts, nil
+}
+
+func isCoveredByMountedDir(target string, mountedDirs map[string]struct{}) bool {
+	if len(mountedDirs) == 0 {
+		return false
+	}
+	curr := path.Dir(target)
+	for curr != "/" && curr != "." {
+		if _, ok := mountedDirs[curr]; ok {
+			return true
+		}
+		curr = path.Dir(curr)
+	}
+	return false
 }
 
 func formatEnv(env map[string]string) []string {

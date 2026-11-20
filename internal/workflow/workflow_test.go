@@ -103,6 +103,21 @@ func TestParseValidationErrors(t *testing.T) {
 			wantErr: "dependency at index 0 is invalid",
 		},
 		{
+			name:    "absolute include path",
+			yaml:    "name: abs-inc\ninclude: [/etc/passwd]\ntasks:\n  - id: a\n    runtime: python\n    script: print(1)\n",
+			wantErr: "must be relative",
+		},
+		{
+			name:    "traversal include path",
+			yaml:    "name: trav-inc\ntasks:\n  - id: a\n    runtime: python\n    include: [../secret.py]\n    script: print(1)\n",
+			wantErr: "must stay inside",
+		},
+		{
+			name:    "empty include path",
+			yaml:    "name: empty-inc\ntasks:\n  - id: a\n    runtime: python\n    include: [\"  \"]\n    script: print(1)\n",
+			wantErr: "include path at index 0 is empty",
+		},
+		{
 			name: "cycle detection",
 			yaml: `name: cycle
 tasks:
