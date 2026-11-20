@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -117,6 +118,7 @@ func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
 type DockerRunner struct {
 	cli     *client.Client
 	noCache bool
+	imageMu sync.Mutex
 }
 
 // NewDockerRunner initializes a Docker SDK client using environment settings and API negotiation.
@@ -160,17 +162,9 @@ func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string,
 		return nil, fmt.Errorf("write script file %q: %w", hostScriptPath, err)
 	}
 
-	baseInfo, err := r.ensureImage(ctx, spec.Image)
+	runImage, err := r.prepareRunImage(ctx, spec.Image, task)
 	if err != nil {
 		return nil, err
-	}
-
-	runImage := spec.Image
-	if len(task.Dependencies) > 0 {
-		runImage, err = r.ensureDependencyImage(ctx, spec.Image, baseInfo.ID, task)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	includeMounts, err := resolveIncludeMounts(task)
@@ -226,6 +220,20 @@ func (r *DockerRunner) RunTask(ctx context.Context, runID, hostWorkspace string,
 		ExitCode: exitCode,
 		Logs:     logs,
 	}, nil
+}
+
+func (r *DockerRunner) prepareRunImage(ctx context.Context, baseImage string, task workflow.Task) (string, error) {
+	r.imageMu.Lock()
+	defer r.imageMu.Unlock()
+
+	baseInfo, err := r.ensureImage(ctx, baseImage)
+	if err != nil {
+		return "", err
+	}
+	if len(task.Dependencies) == 0 {
+		return baseImage, nil
+	}
+	return r.ensureDependencyImage(ctx, baseImage, baseInfo.ID, task)
 }
 
 func (r *DockerRunner) ensureImage(ctx context.Context, imageName string) (image.InspectResponse, error) {
