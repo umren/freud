@@ -1,0 +1,19 @@
+name: full-pipeline
+cron: "0 2 * * *"
+tasks:
+  - id: run_etl
+    flow: etl-example
+
+  - id: run_audit
+    flow: workspace-audit
+    depends_on:
+      - run_etl
+    env:
+      PIPELINE_ENV: "subflow-verified"
+
+  - id: finish_banner
+    image: alpine:3.20
+    depends_on:
+      - run_audit
+    script: |
+      echo "[full-pipeline] Subflows etl-example and workspace-audit completed!"

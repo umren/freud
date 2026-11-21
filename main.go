@@ -31,7 +31,7 @@ const (
 
 func main() {
 	if err := runCLI(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "[orchestrator] Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[freud] Error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -47,8 +47,8 @@ func runCLI(args []string) error {
 		return runWorkflowCmd(args[1:])
 	case "cache":
 		return runCacheCmd(args[1:])
-	case "ui":
-		return runUICmd(args[1:])
+	case "dream":
+		return runDreamCmd(args[1:])
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -81,7 +81,7 @@ func runWorkflowCmd(args []string) error {
 		return err
 	}
 	if len(loadedFiles) > 0 {
-		fmt.Printf("[orchestrator] Loaded %d env variable(s) from %s\n", len(baseEnv), strings.Join(loadedFiles, ", "))
+		fmt.Printf("[freud] Loaded %d env variable(s) from %s\n", len(baseEnv), strings.Join(loadedFiles, ", "))
 	}
 
 	store, err := db.Open(dbPath)
@@ -102,8 +102,10 @@ func runWorkflowCmd(args []string) error {
 
 	eng := engine.New(store, dockerRunner, workspacesDir)
 	eng.SetEnv(baseEnv)
+	eng.SetFlowsDir(wf.BaseDir)
 
 	runID, err := eng.Run(ctx, wf)
+	eng.Wait()
 	if err != nil {
 		if runID != "" {
 			return fmt.Errorf("workflow run %s failed: %w", runID, err)
@@ -114,10 +116,10 @@ func runWorkflowCmd(args []string) error {
 	return nil
 }
 
-func runUICmd(args []string) error {
-	fs := flag.NewFlagSet("ui", flag.ContinueOnError)
+func runDreamCmd(args []string) error {
+	fs := flag.NewFlagSet("dream", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	port := fs.Int("port", defaultUIPort, "HTTP port to serve the web UI")
+	port := fs.Int("port", defaultUIPort, "HTTP port to serve the Freud web UI")
 	flowsDir := fs.String("flows-dir", defaultFlowsDir, "Directory containing workflow YAML files")
 	includesDir := fs.String("includes-dir", defaultIncludesDir, "Directory containing shared include files")
 	envFile := fs.String("env-file", "", "Optional path to a .env file for UI-triggered and scheduled runs")
@@ -140,7 +142,7 @@ func runUICmd(args []string) error {
 		return err
 	}
 	if len(loadedFiles) > 0 {
-		fmt.Printf("[ui] Loaded %d env variable(s) from %s\n", len(baseEnv), strings.Join(loadedFiles, ", "))
+		fmt.Printf("[dream] Loaded %d env variable(s) from %s\n", len(baseEnv), strings.Join(loadedFiles, ", "))
 	}
 
 	dockerRunner, err := runner.NewDockerRunner()
@@ -151,6 +153,7 @@ func runUICmd(args []string) error {
 
 	eng := engine.New(store, dockerRunner, workspacesDir)
 	eng.SetEnv(baseEnv)
+	eng.SetFlowsDir(*flowsDir)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -181,7 +184,7 @@ func runUICmd(args []string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Printf("[ui] Web UI listening on http://localhost%s\n", addr)
+		fmt.Printf("[dream] Freud Web UI listening on http://localhost%s\n", addr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -196,6 +199,7 @@ func runUICmd(args []string) error {
 		defer cancel()
 		err := httpServer.Shutdown(shutdownCtx)
 		uiServer.Wait()
+		eng.Wait()
 		return err
 	}
 }
@@ -282,8 +286,8 @@ func formatBytes(bytes int64) string {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  orchestrator run [--env-file <path/to/.env>] [--no-cache] <path/to/workflow.yaml>")
-	fmt.Fprintln(os.Stderr, "  orchestrator ui [--port 4321] [--flows-dir flows] [--includes-dir includes] [--scheduler]")
-	fmt.Fprintln(os.Stderr, "  orchestrator cache ls")
-	fmt.Fprintln(os.Stderr, "  orchestrator cache clear")
+	fmt.Fprintln(os.Stderr, "  freud run [--env-file <path/to/.env>] [--no-cache] <path/to/workflow.yaml>")
+	fmt.Fprintln(os.Stderr, "  freud dream [--port 4321] [--flows-dir flows] [--includes-dir includes] [--scheduler]")
+	fmt.Fprintln(os.Stderr, "  freud cache ls")
+	fmt.Fprintln(os.Stderr, "  freud cache clear")
 }

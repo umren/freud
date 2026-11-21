@@ -8,6 +8,9 @@
       Started: <span class="mono">{{.Run.StartedAt}}</span>
       · Finished: <span class="mono">{{.Run.FinishedAt}}</span>
       · Duration: <span class="mono">{{.Run.Duration}}</span>
+      {{if .Run.ParentRunID}}
+        · Parent: <a class="mono" href="/executions/{{.Run.ParentRunID}}">#{{.Run.ParentRunID}}</a> ({{.Run.ParentTaskID}})
+      {{end}}
     </p>
   </div>
   <div class="toolbar">
@@ -17,6 +20,36 @@
     <span class="badge badge-{{.Run.StatusSlug}}"><span class="dot"></span>{{.Run.Status}}</span>
   </div>
 </div>
+
+{{if .ChildRuns}}
+<section class="card">
+  <div class="card-head">
+    <h2 class="card-title">Triggered Subflows ({{len .ChildRuns}})</h2>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Task</th>
+        <th>Subflow</th>
+        <th>Child Run ID</th>
+        <th>Status</th>
+        <th>Duration</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .ChildRuns}}
+      <tr>
+        <td class="mono muted">{{.ParentTaskID}}</td>
+        <td><strong>{{.WorkflowName}}</strong></td>
+        <td class="mono"><a href="/executions/{{.ID}}">{{.ID}}</a></td>
+        <td><span class="badge badge-{{.StatusSlug}}"><span class="dot"></span>{{.Status}}</span></td>
+        <td class="mono muted">{{.Duration}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
 
 <div class="tabs">
   <button class="tab-btn" :class="{ active: tab === 'logs' }" @click="tab = 'logs'">Tasks & Logs ({{len .Tasks}})</button>

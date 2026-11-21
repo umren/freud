@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	RuntimePython = "python"
-	RuntimeJS     = "js"
-	RuntimeShell  = "shell"
+	RuntimePython  = "python"
+	RuntimeJS      = "js"
+	RuntimeShell   = "shell"
+	RuntimeSubflow = "subflow"
 )
 
 // Workflow represents a parsed YAML pipeline definition.
@@ -41,12 +42,19 @@ type Task struct {
 	ID           string            `yaml:"id"`
 	Runtime      string            `yaml:"runtime,omitempty"`
 	Image        string            `yaml:"image,omitempty"`
+	Flow         string            `yaml:"flow,omitempty"`
+	Wait         *bool             `yaml:"wait,omitempty"`
 	Dependencies []string          `yaml:"dependencies,omitempty"`
 	Include      []string          `yaml:"include,omitempty"`
 	DependsOn    []string          `yaml:"depends_on,omitempty"`
 	Env          map[string]string `yaml:"env,omitempty"`
-	Script       string            `yaml:"script"`
+	Script       string            `yaml:"script,omitempty"`
 	BaseDir      string            `yaml:"-"`
+}
+
+// ShouldWait returns true if a subflow task should block until the child workflow completes.
+func (t Task) ShouldWait() bool {
+	return t.Wait == nil || *t.Wait
 }
 
 // ParseFile reads and validates a workflow YAML file from disk.
@@ -110,14 +118,37 @@ func (w *Workflow) Validate() error {
 			return fmt.Errorf("duplicate task id %q", t.ID)
 		}
 
+		t.Flow = strings.TrimSpace(t.Flow)
 		t.Image = strings.TrimSpace(t.Image)
 		if strings.ContainsAny(t.Image, " \t\r\n") {
 			return fmt.Errorf("task %q image %q must not contain whitespace", t.ID, t.Image)
 		}
 
+		if t.Flow != "" {
+			if t.Flow == w.Name {
+				return fmt.Errorf("task %q cannot invoke its own workflow %q", t.ID, t.Flow)
+			}
+			if t.Runtime != "" && t.Runtime != RuntimeSubflow {
+				return fmt.Errorf("task %q with flow %q cannot also set runtime %q", t.ID, t.Flow, t.Runtime)
+			}
+			if t.Image != "" || len(t.Dependencies) > 0 || len(t.Include) > 0 || strings.TrimSpace(t.Script) != "" {
+				return fmt.Errorf("task %q with flow %q cannot set image, dependencies, include, or script", t.ID, t.Flow)
+			}
+			t.Runtime = RuntimeSubflow
+			taskByID[t.ID] = *t
+			continue
+		}
+
+		if t.Wait != nil {
+			return fmt.Errorf("task %q wait option is only supported with flow", t.ID)
+		}
+		if t.Runtime == RuntimeSubflow {
+			return fmt.Errorf("task %q with runtime %q must specify flow", t.ID, t.Runtime)
+		}
+
 		if t.Runtime == "" {
 			if t.Image == "" {
-				return fmt.Errorf("task %q must specify either runtime or image", t.ID)
+				return fmt.Errorf("task %q must specify either runtime, image, or flow", t.ID)
 			}
 			t.Runtime = RuntimeShell
 		}
@@ -133,8 +164,8 @@ func (w *Workflow) Validate() error {
 			}
 		default:
 			return fmt.Errorf(
-				"task %q has unsupported runtime %q (supported: %q, %q, %q)",
-				t.ID, t.Runtime, RuntimePython, RuntimeJS, RuntimeShell,
+				"task %q has unsupported runtime %q (supported: %q, %q, %q, %q)",
+				t.ID, t.Runtime, RuntimePython, RuntimeJS, RuntimeShell, RuntimeSubflow,
 			)
 		}
 
@@ -311,4 +342,29 @@ func LoadDir(dir string) ([]WorkflowEntry, error) {
 		return result[i].FileName < result[j].FileName
 	})
 	return result, nil
+}
+
+// FindByName locates and parses a workflow by its `name` field inside flowsDir.
+func FindByName(flowsDir, flowName string) (*Workflow, error) {
+	entries, err := LoadDir(flowsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var matched *Workflow
+	for _, entry := range entries {
+		if entry.ParseErr != nil || entry.Workflow == nil {
+			continue
+		}
+		if entry.Workflow.Name == flowName {
+			if matched != nil {
+				return nil, fmt.Errorf("duplicate workflow name %q found in %q", flowName, flowsDir)
+			}
+			matched = entry.Workflow
+		}
+	}
+	if matched == nil {
+		return nil, fmt.Errorf("subflow %q not found in %q", flowName, flowsDir)
+	}
+	return matched, nil
 }

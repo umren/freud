@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -297,5 +298,84 @@ func TestEngineStartAsyncAndLiveLogs(t *testing.T) {
 	finalRec, err := store.GetRun(context.Background(), runID)
 	if err != nil || finalRec.Status != db.StatusSuccess {
 		t.Fatalf("expected final SUCCESS status, got %+v, err=%v", finalRec, err)
+	}
+}
+
+func TestEngineSubflowSuccessFailureAndCycles(t *testing.T) {
+	tmpDir := t.TempDir()
+	flowsDir := filepath.Join(tmpDir, "flows")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatalf("mkdir flows: %v", err)
+	}
+
+	childYAML := `name: child-flow
+tasks:
+  - id: child_task
+    runtime: python
+    script: print("child")
+`
+	parentYAML := `name: parent-flow
+tasks:
+  - id: call_child
+    flow: child-flow
+    env:
+      SHARED: "overridden"
+`
+	if err := os.WriteFile(filepath.Join(flowsDir, "child.yaml"), []byte(childYAML), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(flowsDir, "parent.yaml"), []byte(parentYAML), 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	store, err := db.Open(filepath.Join(tmpDir, "orchestrator.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	mr := &mockRunner{}
+	eng := New(store, mr, filepath.Join(tmpDir, "workspaces"))
+	eng.SetFlowsDir(flowsDir)
+	eng.SetEnv(map[string]string{"SHARED": "base", "GLOBAL": "yes"})
+
+	parentWF, err := workflow.ParseFile(filepath.Join(flowsDir, "parent.yaml"))
+	if err != nil {
+		t.Fatalf("parse parent: %v", err)
+	}
+
+	parentRunID, err := eng.Run(context.Background(), parentWF)
+	if err != nil {
+		t.Fatalf("parent run failed: %v", err)
+	}
+	eng.Wait()
+
+	if mr.capturedEnvs["child_task"]["SHARED"] != "overridden" || mr.capturedEnvs["child_task"]["GLOBAL"] != "yes" {
+		t.Fatalf("expected env propagation to child task, got %+v", mr.capturedEnvs["child_task"])
+	}
+
+	children, err := store.ListChildRuns(context.Background(), parentRunID)
+	if err != nil || len(children) != 1 {
+		t.Fatalf("expected 1 child run, got %+v, err=%v", children, err)
+	}
+	if children[0].ParentRunID.String != parentRunID || children[0].ParentTaskID.String != "call_child" || children[0].Status != db.StatusSuccess {
+		t.Fatalf("unexpected child run record: %+v", children[0])
+	}
+
+	// Cycle detection: cyc-a -> cyc-b -> cyc-a.
+	cycA := "name: cyc-a\ntasks:\n  - id: s1\n    flow: cyc-b\n"
+	cycB := "name: cyc-b\ntasks:\n  - id: s1\n    flow: cyc-a\n"
+	if err := os.WriteFile(filepath.Join(flowsDir, "cyc-a.yaml"), []byte(cycA), 0o644); err != nil {
+		t.Fatalf("write cyc-a: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(flowsDir, "cyc-b.yaml"), []byte(cycB), 0o644); err != nil {
+		t.Fatalf("write cyc-b: %v", err)
+	}
+	cycWF, err := workflow.ParseFile(filepath.Join(flowsDir, "cyc-a.yaml"))
+	if err != nil {
+		t.Fatalf("parse cyc-a: %v", err)
+	}
+	if _, err := eng.Run(context.Background(), cycWF); err == nil || !strings.Contains(err.Error(), "subflow cycle detected") {
+		t.Fatalf("expected subflow cycle error, got %v", err)
 	}
 }

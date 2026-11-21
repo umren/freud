@@ -31,7 +31,7 @@ type Config struct {
 	RunCtx      context.Context
 }
 
-// Server serves the embedded Kestra-inspired web UI over HTTP.
+// Server serves the embedded Freud web UI over HTTP.
 type Server struct {
 	store     *db.Store
 	cfg       Config

@@ -23,7 +23,11 @@ type RunRecord struct {
 	CreatedAt      string
 	FinishedAt     sql.NullString
 	DefinitionJSON sql.NullString
+	ParentRunID    sql.NullString
+	ParentTaskID   sql.NullString
 }
+
+const runSelectCols = `id, workflow_name, status, created_at, finished_at, definition_json, parent_run_id, parent_task_id`
 
 // TaskRunRecord represents a row in the task_runs table.
 type TaskRunRecord struct {
@@ -104,7 +108,9 @@ CREATE TABLE IF NOT EXISTS runs (
 	status TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	finished_at TEXT,
-	definition_json TEXT
+	definition_json TEXT,
+	parent_run_id TEXT,
+	parent_task_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_runs (
@@ -134,6 +140,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
 		def    string
 	}{
 		{"runs", "definition_json", "TEXT"},
+		{"runs", "parent_run_id", "TEXT"},
+		{"runs", "parent_task_id", "TEXT"},
 		{"task_runs", "runtime", "TEXT"},
 		{"task_runs", "image", "TEXT"},
 	}
@@ -178,25 +186,33 @@ func (s *Store) ensureColumn(table, column, colType string) error {
 
 // CreateRun inserts a new workflow run in RUNNING state.
 func (s *Store) CreateRun(ctx context.Context, runID, workflowName string) error {
-	return s.CreateRunWithDefinition(ctx, runID, workflowName, "")
+	return s.CreateRunWithParent(ctx, runID, workflowName, "", "", "")
 }
 
 // CreateRunWithDefinition inserts a new workflow run in RUNNING state with a JSON workflow snapshot.
 func (s *Store) CreateRunWithDefinition(ctx context.Context, runID, workflowName, definitionJSON string) error {
+	return s.CreateRunWithParent(ctx, runID, workflowName, definitionJSON, "", "")
+}
+
+// CreateRunWithParent inserts a new workflow run with optional definition snapshot and parent link.
+func (s *Store) CreateRunWithParent(ctx context.Context, runID, workflowName, definitionJSON, parentRunID, parentTaskID string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	var def sql.NullString
-	if definitionJSON != "" {
-		def = sql.NullString{String: definitionJSON, Valid: true}
-	}
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO runs (id, workflow_name, status, created_at, definition_json) VALUES (?, ?, ?, ?, ?)`,
-		runID, workflowName, StatusRunning, now, def,
+		`INSERT INTO runs (id, workflow_name, status, created_at, definition_json, parent_run_id, parent_task_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		runID, workflowName, StatusRunning, now, nullString(definitionJSON), nullString(parentRunID), nullString(parentTaskID),
 	)
 	if err != nil {
 		return fmt.Errorf("insert run %q: %w", runID, err)
 	}
 	return nil
+}
+
+func nullString(v string) sql.NullString {
+	if v == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: v, Valid: true}
 }
 
 // FinishRun updates the final status and completion timestamp of a workflow run.
@@ -282,11 +298,20 @@ func (s *Store) FinishTaskRun(ctx context.Context, taskRunID int64, status strin
 func (s *Store) GetRun(ctx context.Context, runID string) (*RunRecord, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, workflow_name, status, created_at, finished_at, definition_json FROM runs WHERE id = ?`,
+		`SELECT `+runSelectCols+` FROM runs WHERE id = ?`,
 		runID,
 	)
 	var rec RunRecord
-	if err := row.Scan(&rec.ID, &rec.WorkflowName, &rec.Status, &rec.CreatedAt, &rec.FinishedAt, &rec.DefinitionJSON); err != nil {
+	if err := row.Scan(
+		&rec.ID,
+		&rec.WorkflowName,
+		&rec.Status,
+		&rec.CreatedAt,
+		&rec.FinishedAt,
+		&rec.DefinitionJSON,
+		&rec.ParentRunID,
+		&rec.ParentTaskID,
+	); err != nil {
 		return nil, fmt.Errorf("get run %q: %w", runID, err)
 	}
 	return &rec, nil
@@ -311,7 +336,7 @@ func (s *Store) GetRunStats(ctx context.Context) (RunStats, error) {
 
 // ListRuns returns runs ordered from newest to oldest, optionally filtered by status.
 func (s *Store) ListRuns(ctx context.Context, limit int, statusFilter string) ([]RunRecord, error) {
-	query := `SELECT id, workflow_name, status, created_at, finished_at, definition_json FROM runs`
+	query := `SELECT ` + runSelectCols + ` FROM runs`
 	var args []any
 	if statusFilter != "" {
 		query += ` WHERE status = ?`
@@ -328,7 +353,7 @@ func (s *Store) ListRuns(ctx context.Context, limit int, statusFilter string) ([
 
 // ListRunsByWorkflow returns runs for a specific workflow ordered from newest to oldest.
 func (s *Store) ListRunsByWorkflow(ctx context.Context, workflowName string, limit int) ([]RunRecord, error) {
-	query := `SELECT id, workflow_name, status, created_at, finished_at, definition_json FROM runs WHERE workflow_name = ? ORDER BY created_at DESC`
+	query := `SELECT ` + runSelectCols + ` FROM runs WHERE workflow_name = ? ORDER BY created_at DESC`
 	args := []any{workflowName}
 	if limit > 0 {
 		query += ` LIMIT ?`
@@ -337,10 +362,16 @@ func (s *Store) ListRunsByWorkflow(ctx context.Context, workflowName string, lim
 	return s.queryRuns(ctx, query, args...)
 }
 
+// ListChildRuns returns subflow runs triggered by parentRunID ordered chronologically.
+func (s *Store) ListChildRuns(ctx context.Context, parentRunID string) ([]RunRecord, error) {
+	query := `SELECT ` + runSelectCols + ` FROM runs WHERE parent_run_id = ? ORDER BY created_at ASC`
+	return s.queryRuns(ctx, query, parentRunID)
+}
+
 // GetLatestRunByWorkflow returns the most recent RunRecord keyed by workflow_name.
 func (s *Store) GetLatestRunByWorkflow(ctx context.Context) (map[string]RunRecord, error) {
 	runs, err := s.queryRuns(ctx, `
-		SELECT r.id, r.workflow_name, r.status, r.created_at, r.finished_at, r.definition_json
+		SELECT r.id, r.workflow_name, r.status, r.created_at, r.finished_at, r.definition_json, r.parent_run_id, r.parent_task_id
 		FROM runs r
 		INNER JOIN (
 			SELECT workflow_name, MAX(created_at) AS max_created
@@ -375,6 +406,8 @@ func (s *Store) queryRuns(ctx context.Context, query string, args ...any) ([]Run
 			&rec.CreatedAt,
 			&rec.FinishedAt,
 			&rec.DefinitionJSON,
+			&rec.ParentRunID,
+			&rec.ParentTaskID,
 		); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}

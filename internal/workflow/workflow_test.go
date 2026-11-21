@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -79,7 +80,7 @@ func TestParseValidationErrors(t *testing.T) {
 		{
 			name:    "missing runtime and image",
 			yaml:    "name: missing-both\ntasks:\n  - id: a\n    script: echo 1\n",
-			wantErr: "must specify either runtime or image",
+			wantErr: "must specify either runtime, image, or flow",
 		},
 		{
 			name:    "shell runtime without image",
@@ -193,8 +194,8 @@ func TestParseFlowsDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDir failed: %v", err)
 	}
-	if len(entries) < 2 {
-		t.Fatalf("expected at least 2 flows in %s, got %d", flowsDir, len(entries))
+	if len(entries) < 3 {
+		t.Fatalf("expected at least 3 flows in %s, got %d", flowsDir, len(entries))
 	}
 	for _, entry := range entries {
 		if entry.ParseErr != nil {
@@ -203,5 +204,64 @@ func TestParseFlowsDir(t *testing.T) {
 		if entry.Workflow == nil {
 			t.Fatalf("flow %q returned nil workflow", entry.FileName)
 		}
+	}
+}
+
+func TestParseSubflowValidationAndFindByName(t *testing.T) {
+	valid := `
+name: parent-flow
+tasks:
+  - id: call_child
+    flow: child-flow
+    wait: false
+    env:
+      FOO: bar
+`
+	wf, err := Parse([]byte(valid))
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if wf.Tasks[0].Runtime != RuntimeSubflow || wf.Tasks[0].ShouldWait() {
+		t.Fatalf("unexpected subflow task: %+v", wf.Tasks[0])
+	}
+
+	invalidCases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "self call",
+			yaml: "name: loop\ntasks:\n  - id: a\n    flow: loop\n",
+			want: "cannot invoke its own workflow",
+		},
+		{
+			name: "flow with script",
+			yaml: "name: bad\ntasks:\n  - id: a\n    flow: other\n    script: echo 1\n",
+			want: "cannot set image, dependencies, include, or script",
+		},
+		{
+			name: "wait without flow",
+			yaml: "name: bad\ntasks:\n  - id: a\n    runtime: python\n    wait: true\n    script: print(1)\n",
+			want: "wait option is only supported with flow",
+		},
+	}
+	for _, tc := range invalidCases {
+		if _, err := Parse([]byte(tc.yaml)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: expected error containing %q, got %v", tc.name, tc.want, err)
+		}
+	}
+
+	dir := t.TempDir()
+	childYAML := "name: child-flow\ntasks:\n  - id: t1\n    runtime: python\n    script: print(1)\n"
+	if err := os.WriteFile(filepath.Join(dir, "child.yaml"), []byte(childYAML), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	found, err := FindByName(dir, "child-flow")
+	if err != nil || found.Name != "child-flow" {
+		t.Fatalf("FindByName failed: %+v, err=%v", found, err)
+	}
+	if _, err := FindByName(dir, "missing-flow"); err == nil {
+		t.Fatalf("expected error for missing subflow")
 	}
 }

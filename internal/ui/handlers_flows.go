@@ -172,9 +172,13 @@ func (s *Server) handleFlowDetail(w http.ResponseWriter, r *http.Request) {
 
 	dagInput := make([]DAGTaskInput, 0, len(matched.Workflow.Tasks))
 	for _, t := range matched.Workflow.Tasks {
+		rt := t.Runtime
+		if t.Flow != "" {
+			rt = "subflow → " + t.Flow
+		}
 		dagInput = append(dagInput, DAGTaskInput{
 			ID:        t.ID,
-			Runtime:   t.Runtime,
+			Runtime:   rt,
 			Image:     t.Image,
 			DependsOn: t.DependsOn,
 		})

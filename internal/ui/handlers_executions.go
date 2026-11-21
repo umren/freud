@@ -19,6 +19,8 @@ type runRowView struct {
 	StartedAt    string
 	FinishedAt   string
 	Duration     string
+	ParentRunID  string
+	ParentTaskID string
 	SearchKey    string
 }
 
@@ -45,9 +47,10 @@ type taskRunView struct {
 
 type executionDetailViewData struct {
 	basePageData
-	Run   runRowView
-	Tasks []taskRunView
-	DAG   DAGGraph
+	Run       runRowView
+	Tasks     []taskRunView
+	ChildRuns []runRowView
+	DAG       DAGGraph
 }
 
 type runSnapshot struct {
@@ -55,6 +58,7 @@ type runSnapshot struct {
 		ID        string   `json:"id"`
 		Runtime   string   `json:"runtime"`
 		Image     string   `json:"image"`
+		Flow      string   `json:"flow"`
 		DependsOn []string `json:"depends_on"`
 	} `json:"tasks"`
 }
@@ -110,6 +114,10 @@ func (s *Server) buildExecutionDetailData(ctx context.Context, runID string) (ex
 		return executionDetailViewData{}, false, err
 	}
 	taskRecs, err := s.store.ListTaskRuns(ctx, runID)
+	if err != nil {
+		return executionDetailViewData{}, false, err
+	}
+	childRecs, err := s.store.ListChildRuns(ctx, runID)
 	if err != nil {
 		return executionDetailViewData{}, false, err
 	}
@@ -192,9 +200,13 @@ func (s *Server) buildExecutionDetailData(ctx context.Context, runID string) (ex
 				if st == "" {
 					st = "PENDING"
 				}
+				rt := t.Runtime
+				if t.Flow != "" {
+					rt = "subflow → " + t.Flow
+				}
 				dagInput = append(dagInput, DAGTaskInput{
 					ID:        t.ID,
-					Runtime:   t.Runtime,
+					Runtime:   rt,
 					Image:     t.Image,
 					DependsOn: t.DependsOn,
 					Status:    st,
@@ -208,6 +220,7 @@ func (s *Server) buildExecutionDetailData(ctx context.Context, runID string) (ex
 		basePageData: s.newBaseData(runRec.WorkflowName+" · "+runRec.ID, "executions", stats.Running),
 		Run:          runView,
 		Tasks:        taskViews,
+		ChildRuns:    toRunRowViews(childRecs, now),
 		DAG:          dag,
 	}, true, nil
 }
@@ -263,6 +276,8 @@ func toRunRowViews(records []db.RunRecord, now time.Time) []runRowView {
 			StartedAt:    started,
 			FinishedAt:   finished,
 			Duration:     durStr,
+			ParentRunID:  r.ParentRunID.String,
+			ParentTaskID: r.ParentTaskID.String,
 			SearchKey:    strings.ToLower(r.ID + " " + r.WorkflowName + " " + r.Status),
 		})
 	}

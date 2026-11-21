@@ -4,7 +4,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{.Title}} · Orchestrator</title>
+  <title>{{.Title}} · Freud</title>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('freud-theme');
+        document.documentElement.dataset.theme = (t === 'light') ? 'light' : 'dark';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
   <script defer src="/static/alpine.min.js"></script>
@@ -15,8 +25,8 @@
       <div class="brand">
         <div class="brand-mark">F</div>
         <div>
-          <div class="brand-title">Orchestrator</div>
-          <div class="brand-sub">v0.1 · Local Runner</div>
+          <div class="brand-title">Freud</div>
+          <div class="brand-sub">v0.1 · Task Orchestrator</div>
         </div>
       </div>
 
@@ -38,9 +48,23 @@
         </a>
       </nav>
 
-      <div class="sidebar-foot">
-        <div>Port: <span class="mono">{{.Addr}}</span></div>
-        <div>Scheduler: <span class="mono">{{if .SchedulerOn}}enabled{{else}}standby{{end}}</span></div>
+      <div class="sidebar-foot"
+           x-data="{
+             theme: document.documentElement.dataset.theme || 'dark',
+             toggle() {
+               this.theme = (this.theme === 'dark') ? 'light' : 'dark';
+               document.documentElement.dataset.theme = this.theme;
+               try { localStorage.setItem('freud-theme', this.theme); } catch (e) {}
+             }
+           }">
+        <button type="button" class="theme-btn" @click="toggle()">
+          <span>Theme</span>
+          <span class="mono" x-text="theme === 'dark' ? 'Dark' : 'Light'"></span>
+        </button>
+        <div class="sidebar-meta">
+          <div>Port: <span class="mono">{{.Addr}}</span></div>
+          <div>Scheduler: <span class="mono">{{if .SchedulerOn}}enabled{{else}}standby{{end}}</span></div>
+        </div>
       </div>
     </aside>
 

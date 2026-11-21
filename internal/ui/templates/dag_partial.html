@@ -3,7 +3,7 @@
   <svg width="{{.Width}}" height="{{.Height}}" viewBox="0 0 {{.Width}} {{.Height}}" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-        <path d="M 0 1 L 7 4 L 0 7 z" fill="#64748b"/>
+        <path d="M 0 1 L 7 4 L 0 7 z" fill="var(--dag-edge)"/>
       </marker>
     </defs>
     {{range .Edges}}
@@ -12,8 +12,8 @@
     {{range .Nodes}}
       <g class="dag-node {{.StatusCls}}" transform="translate({{.X}}, {{.Y}})">
         <rect width="{{.Width}}" height="{{.Height}}"/>
-        <text x="12" y="25" fill="#e6ebf5" font-size="13" font-weight="600" font-family="ui-monospace, monospace">{{.ID}}</text>
-        <text x="12" y="45" fill="#94a3b8" font-size="11" font-family="-apple-system, sans-serif">{{.Runtime}}{{if .Status}} · {{.Status}}{{end}}</text>
+        <text x="12" y="25" fill="var(--text)" font-size="13" font-weight="600" font-family="ui-monospace, monospace">{{.ID}}</text>
+        <text x="12" y="45" fill="var(--muted)" font-size="11" font-family="-apple-system, sans-serif">{{.Runtime}}{{if .Status}} · {{.Status}}{{end}}</text>
       </g>
     {{end}}
   </svg>

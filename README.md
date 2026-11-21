@@ -1,6 +1,6 @@
-# Orchestrator (v0.1)
+# Freud (v0.1)
 
-A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype) that parses YAML workflow definitions, resolves task dependencies as a DAG, executes tasks in ephemeral Docker containers, shares data across steps via a per-run workspace directory, and persists execution state and logs in SQLite.
+A pure-Go task orchestrator that parses YAML workflow definitions, resolves task dependencies as a DAG, executes tasks in ephemeral Docker containers, shares data across steps via a per-run workspace directory, and persists execution state and logs in SQLite.
 
 ## Features
 
@@ -14,7 +14,7 @@ A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype
 - **Shared per-run workspace & read-only includes**: creates `./workspaces/<run_id>` on the host (mounted at `/workspace`) and mounts external helper modules/configs from `includes/` (or explicit `include:` paths) read-only at `/includes` with zero file copying.
 - **Reliable log & status capture**: disables `AutoRemove`, waits for container completion, demultiplexes stdout/stderr, prints output, stores logs and exit codes in SQLite, and then removes the container.
 - **Fail-fast execution**: stops the pipeline immediately if a task exits with a non-zero status, marking both the task and the workflow run as `FAILED`.
-- **Cron schedules & embedded Web UI**: workflows support standard 5-field `cron` expressions (and `@hourly`/`@daily`/etc.), and `orchestrator ui` serves a Kestra-inspired web UI (Go `html/template` + embedded HTMX & Alpine.js) on port `4321` with Dashboard, Flows, Executions, and Includes pages.
+- **Cron schedules & embedded Web UI**: workflows support standard 5-field `cron` expressions (and `@hourly`/`@daily`/etc.), and `freud dream` serves an embedded web UI (Go `html/template` + HTMX & Alpine.js) on port `4321` with Dashboard, Flows, Executions, and Includes pages.
 - **SQLite persistence (`orchestrator.db`)**: configured with `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;`.
 
 ## Requirements
@@ -26,7 +26,7 @@ A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype
 
 ```text
 .
-├── main.go                 # CLI entrypoint (`run`, `ui`, `cache`)
+├── main.go                 # CLI entrypoint (`run`, `dream`, `cache`)
 ├── flows/                  # Workflow YAML definitions (`etl-example.yaml`, `workspace-audit.yaml`)
 ├── includes/               # Shared helper files mounted read-only at `/includes`
 ├── go.mod
@@ -45,13 +45,13 @@ A minimal pure-Go CLI task orchestrator (a lightweight Kestra-inspired prototype
 
 ```bash
 go mod tidy
-go build -o orchestrator .
+go build -o freud .
 ```
 
 To verify a static pure-Go build without CGO:
 
 ```bash
-CGO_ENABLED=0 go build -o orchestrator .
+CGO_ENABLED=0 go build -o freud .
 ```
 
 ## Usage
@@ -59,22 +59,22 @@ CGO_ENABLED=0 go build -o orchestrator .
 Run a workflow YAML file:
 
 ```bash
-./orchestrator run flows/etl-example.yaml
+./freud run flows/etl-example.yaml
 ```
 
 Optionally pass a custom `.env` file or force-rebuild cached dependency images:
 
 ```bash
-./orchestrator run --env-file .env.prod flows/etl-example.yaml
-./orchestrator run --no-cache flows/etl-example.yaml
+./freud run --env-file .env.prod flows/etl-example.yaml
+./freud run --no-cache flows/etl-example.yaml
 ```
 
 Start the embedded Web UI (default port `4321`):
 
 ```bash
-./orchestrator ui
+./freud dream
 # Optional flags:
-./orchestrator ui --port 4321 --flows-dir flows --includes-dir includes --scheduler
+./freud dream --port 4321 --flows-dir flows --includes-dir includes --scheduler
 ```
 
 The Web UI exposes four pages (no auth required locally):
@@ -86,8 +86,8 @@ The Web UI exposes four pages (no auth required locally):
 Manage cached dependency images:
 
 ```bash
-./orchestrator cache ls
-./orchestrator cache clear
+./freud cache ls
+./freud cache clear
 ```
 
 ### Environment Variables (`.env`)
@@ -106,6 +106,8 @@ You can interrupt a running workflow with `Ctrl+C` (`SIGINT`/`SIGTERM`), which c
    - **`transform`** (`runtime: js`, `depends_on: [extract]`, `dependencies: [lodash-es, ms]`, `include: [includes/math_utils.ts]`): installs `lodash-es` and `ms`, imports `formatStats` from `/includes/math_utils.ts`, reads `/workspace/payload.json`, computes the sum (`102`) with `lodash-es`, and prints the `.env` variables and stats to stdout.
 2. **[`flows/workspace-audit.yaml`](flows/workspace-audit.yaml)** (`cron: "*/30 * * * *"`, `include: [includes]`):
    - Three-step `alpine:3.20` -> `python` -> `js` pipeline inspecting mounted `/includes` items and publishing an audit summary.
+3. **[`flows/full-pipeline.yaml`](flows/full-pipeline.yaml)** (`cron: "0 2 * * *"`):
+   - Orchestrates `etl-example` and `workspace-audit` sequentially via `flow:` subflow tasks (passing an `env:` override to `workspace-audit`) followed by a final summary step.
 
 ## Workflow YAML Specification
 
@@ -117,7 +119,7 @@ include:                      # optional workflow-wide read-only files/dirs moun
 tasks:
   - id: step_one
     runtime: python           # "python", "js", or "shell" (optional if image is set)
-    image: python:3.13-slim   # optional Docker image override (Kestra-style)
+    image: python:3.13-slim   # optional Docker image override
     dependencies:             # optional packages installed in the task container
       - pydantic
       - pyyaml
@@ -147,6 +149,14 @@ tasks:
       - step_two
     script: |
       ls -la /workspace /includes
+
+  - id: call_other_flow
+    flow: workspace-audit     # invokes another flow by its `name`
+    wait: true                # optional (default true); set false for fire-and-forget
+    depends_on:
+      - step_three
+    env:
+      PIPELINE_ENV: "prod"
 ```
 
 ### Included Files (`/includes`)

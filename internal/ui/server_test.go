@@ -66,6 +66,12 @@ tasks:
 	if err := store.FinishRun(ctx, "run-001", db.StatusSuccess); err != nil {
 		t.Fatalf("FinishRun: %v", err)
 	}
+	if err := store.CreateRunWithParent(ctx, "child-001", "child-flow", "", "run-001", "step2"); err != nil {
+		t.Fatalf("CreateRunWithParent: %v", err)
+	}
+	if err := store.FinishRun(ctx, "child-001", db.StatusSuccess); err != nil {
+		t.Fatalf("FinishRun child: %v", err)
+	}
 
 	srv, err := NewServer(store, Config{
 		Addr:        ":4321",
@@ -88,6 +94,8 @@ tasks:
 		{"/executions", "run-001"},
 		{"/partials/executions?status=SUCCESS", "run-001"},
 		{"/executions/run-001", "step1 ok"},
+		{"/executions/run-001", "Triggered Subflows"},
+		{"/executions/child-001", "/executions/run-001"},
 		{"/partials/executions/run-001", "Task Execution Timeline"},
 		{"/includes", "helper.py"},
 		{"/includes?file=helper.py", `<span class="tok-kw">def</span>`},

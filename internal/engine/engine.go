@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ const (
 	defaultWorkspacesDir = "workspaces"
 	scriptsDirName       = ".scripts"
 	logFlushInterval     = 250 * time.Millisecond
+	maxSubflowDepth      = 10
 )
 
 // TaskRunner defines the execution backend for running a single workflow task.
@@ -39,7 +41,16 @@ type Engine struct {
 	store          *db.Store
 	runner         TaskRunner
 	workspacesBase string
+	flowsDir       string
 	baseEnv        map[string]string
+	wg             sync.WaitGroup
+}
+
+type runOptions struct {
+	baseEnv      map[string]string
+	parentRunID  string
+	parentTaskID string
+	flowStack    []string
 }
 
 // New creates a workflow execution Engine.
@@ -59,13 +70,27 @@ func (e *Engine) SetEnv(baseEnv map[string]string) {
 	e.baseEnv = baseEnv
 }
 
+// SetFlowsDir sets the directory used to resolve subflows referenced by `flow: <name>`.
+func (e *Engine) SetFlowsDir(dir string) {
+	e.flowsDir = dir
+}
+
+// Wait blocks until any fire-and-forget subflows (`wait: false`) complete.
+func (e *Engine) Wait() {
+	e.wg.Wait()
+}
+
 // Run executes all tasks in the workflow in topological order and persists run metadata to SQLite.
 func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error) {
-	runID, hostWorkspace, orderedTasks, err := e.prepareRun(ctx, wf)
+	opts := runOptions{
+		baseEnv:   e.baseEnv,
+		flowStack: []string{wf.Name},
+	}
+	runID, hostWorkspace, orderedTasks, err := e.prepareRun(ctx, wf, opts)
 	if err != nil {
 		return "", err
 	}
-	if err := e.executeRun(ctx, runID, hostWorkspace, wf, orderedTasks); err != nil {
+	if err := e.executeRun(ctx, runID, hostWorkspace, wf, orderedTasks, opts); err != nil {
 		return runID, err
 	}
 	return runID, nil
@@ -74,20 +99,28 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 // StartAsync validates the workflow, creates the run record synchronously, and executes tasks asynchronously.
 // The returned channel receives the final execution error (or nil) once the run completes.
 func (e *Engine) StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error) {
-	runID, hostWorkspace, orderedTasks, err := e.prepareRun(ctx, wf)
+	opts := runOptions{
+		baseEnv:   e.baseEnv,
+		flowStack: []string{wf.Name},
+	}
+	return e.startAsyncWithOptions(ctx, wf, opts)
+}
+
+func (e *Engine) startAsyncWithOptions(ctx context.Context, wf *workflow.Workflow, opts runOptions) (string, <-chan error, error) {
+	runID, hostWorkspace, orderedTasks, err := e.prepareRun(ctx, wf, opts)
 	if err != nil {
 		return "", nil, err
 	}
 
 	doneCh := make(chan error, 1)
 	go func() {
-		doneCh <- e.executeRun(ctx, runID, hostWorkspace, wf, orderedTasks)
+		doneCh <- e.executeRun(ctx, runID, hostWorkspace, wf, orderedTasks, opts)
 		close(doneCh)
 	}()
 	return runID, doneCh, nil
 }
 
-func (e *Engine) prepareRun(ctx context.Context, wf *workflow.Workflow) (string, string, []workflow.Task, error) {
+func (e *Engine) prepareRun(ctx context.Context, wf *workflow.Workflow, opts runOptions) (string, string, []workflow.Task, error) {
 	orderedTasks, err := wf.TopologicalOrder()
 	if err != nil {
 		return "", "", nil, fmt.Errorf("resolve execution order: %w", err)
@@ -105,18 +138,20 @@ func (e *Engine) prepareRun(ctx context.Context, wf *workflow.Workflow) (string,
 	}
 
 	defJSON := marshalWorkflowSnapshot(wf)
-	if err := e.store.CreateRunWithDefinition(ctx, runID, wf.Name, defJSON); err != nil {
+	if err := e.store.CreateRunWithParent(ctx, runID, wf.Name, defJSON, opts.parentRunID, opts.parentTaskID); err != nil {
 		return "", "", nil, fmt.Errorf("record workflow run start: %w", err)
 	}
 
 	return runID, hostWorkspace, orderedTasks, nil
 }
 
-func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf *workflow.Workflow, orderedTasks []workflow.Task) error {
+func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf *workflow.Workflow, orderedTasks []workflow.Task, opts runOptions) error {
 	fmt.Printf("[engine] Starting workflow %q (run_id=%s, workspace=%s)\n", wf.Name, runID, hostWorkspace)
 
 	for _, task := range orderedTasks {
-		if task.Image != "" {
+		if task.Flow != "" {
+			fmt.Printf("[engine] Running subflow task %q (flow=%q, wait=%v)\n", task.ID, task.Flow, task.ShouldWait())
+		} else if task.Image != "" {
 			fmt.Printf("[engine] Running task %q (runtime=%s, image=%s)\n", task.ID, task.Runtime, task.Image)
 		} else {
 			fmt.Printf("[engine] Running task %q (runtime=%s)\n", task.ID, task.Runtime)
@@ -129,7 +164,7 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 		}
 
 		execTask := task
-		execTask.Env = env.MergeTaskEnv(e.baseEnv, task.Env)
+		execTask.Env = env.MergeTaskEnv(opts.baseEnv, task.Env)
 		execTask.Include = mergeIncludes(wf.Include, task.Include)
 		if execTask.BaseDir == "" {
 			if wf.BaseDir != "" {
@@ -139,7 +174,13 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 			}
 		}
 
-		res, runErr := e.runTaskWithLiveLogs(ctx, runID, hostWorkspace, taskRunID, execTask)
+		var res *runner.Result
+		var runErr error
+		if task.Flow != "" {
+			res, runErr = e.executeSubflowTask(ctx, runID, taskRunID, wf, execTask, opts)
+		} else {
+			res, runErr = e.runTaskWithLiveLogs(ctx, runID, hostWorkspace, taskRunID, execTask)
+		}
 
 		var exitCode int64 = -1
 		var logs string
@@ -153,7 +194,7 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 				if logs != "" {
 					logs += "\n"
 				}
-				logs += fmt.Sprintf("[orchestrator error] %v", runErr)
+				logs += fmt.Sprintf("[freud error] %v", runErr)
 			}
 
 			e.markTaskFinished(taskRunID, db.StatusFailed, exitCode, logs)
@@ -182,6 +223,79 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 	return nil
 }
 
+func (e *Engine) executeSubflowTask(
+	ctx context.Context,
+	parentRunID string,
+	taskRunID int64,
+	parentWF *workflow.Workflow,
+	task workflow.Task,
+	parentOpts runOptions,
+) (*runner.Result, error) {
+	if len(parentOpts.flowStack) >= maxSubflowDepth {
+		return &runner.Result{ExitCode: 1}, fmt.Errorf("subflow depth limit (%d) exceeded calling %q", maxSubflowDepth, task.Flow)
+	}
+	for _, activeName := range parentOpts.flowStack {
+		if activeName == task.Flow {
+			chain := append(append([]string{}, parentOpts.flowStack...), task.Flow)
+			return &runner.Result{ExitCode: 1}, fmt.Errorf("subflow cycle detected: %s", strings.Join(chain, " -> "))
+		}
+	}
+
+	flowsDir := e.flowsDir
+	if flowsDir == "" {
+		flowsDir = parentWF.BaseDir
+	}
+	if flowsDir == "" {
+		flowsDir = "."
+	}
+
+	childWF, err := workflow.FindByName(flowsDir, task.Flow)
+	if err != nil {
+		return &runner.Result{ExitCode: 1}, err
+	}
+
+	nextStack := make([]string, len(parentOpts.flowStack)+1)
+	copy(nextStack, parentOpts.flowStack)
+	nextStack[len(parentOpts.flowStack)] = childWF.Name
+
+	childOpts := runOptions{
+		baseEnv:      task.Env,
+		parentRunID:  parentRunID,
+		parentTaskID: task.ID,
+		flowStack:    nextStack,
+	}
+
+	childRunID, childDone, err := e.startAsyncWithOptions(ctx, childWF, childOpts)
+	if err != nil {
+		return &runner.Result{ExitCode: 1}, fmt.Errorf("start subflow %q: %w", task.Flow, err)
+	}
+
+	var logBuf strings.Builder
+	fmt.Fprintf(&logBuf, "[subflow] Started workflow %q (run_id=%s, wait=%v)\n", childWF.Name, childRunID, task.ShouldWait())
+	_ = e.store.UpdateTaskRunLogs(ctx, taskRunID, logBuf.String())
+
+	if !task.ShouldWait() {
+		fmt.Fprintf(&logBuf, "[subflow] Dispatched async subflow %q (run_id=%s)\n", childWF.Name, childRunID)
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			if childErr := <-childDone; childErr != nil {
+				fmt.Fprintf(os.Stderr, "[subflow] Async child run %s (%s) failed: %v\n", childRunID, childWF.Name, childErr)
+			}
+		}()
+		return &runner.Result{ExitCode: 0, Logs: logBuf.String()}, nil
+	}
+
+	childErr := <-childDone
+	if childErr != nil {
+		fmt.Fprintf(&logBuf, "[subflow] Child run %s FAILED: %v\n", childRunID, childErr)
+		return &runner.Result{ExitCode: 1, Logs: logBuf.String()}, fmt.Errorf("subflow %q (run_id=%s) failed: %w", childWF.Name, childRunID, childErr)
+	}
+
+	fmt.Fprintf(&logBuf, "[subflow] Child run %s SUCCEEDED\n", childRunID)
+	return &runner.Result{ExitCode: 0, Logs: logBuf.String()}, nil
+}
+
 func (e *Engine) runTaskWithLiveLogs(ctx context.Context, runID, hostWorkspace string, taskRunID int64, task workflow.Task) (*runner.Result, error) {
 	sr, ok := e.runner.(StreamingTaskRunner)
 	if !ok {
@@ -189,11 +303,11 @@ func (e *Engine) runTaskWithLiveLogs(ctx context.Context, runID, hostWorkspace s
 	}
 
 	var (
-		mu      sync.Mutex
-		latest  string
-		dirty   bool
-		stopCh  = make(chan struct{})
-		doneCh  = make(chan struct{})
+		mu     sync.Mutex
+		latest string
+		dirty  bool
+		stopCh = make(chan struct{})
+		doneCh = make(chan struct{})
 	)
 
 	go func() {
@@ -266,6 +380,7 @@ type taskDefSnapshot struct {
 	ID        string   `json:"id"`
 	Runtime   string   `json:"runtime"`
 	Image     string   `json:"image,omitempty"`
+	Flow      string   `json:"flow,omitempty"`
 	DependsOn []string `json:"depends_on,omitempty"`
 }
 
@@ -280,6 +395,7 @@ func marshalWorkflowSnapshot(wf *workflow.Workflow) string {
 			ID:        t.ID,
 			Runtime:   t.Runtime,
 			Image:     t.Image,
+			Flow:      t.Flow,
 			DependsOn: t.DependsOn,
 		})
 	}
