@@ -232,7 +232,12 @@ func (r *DockerRunner) RunTaskStream(ctx context.Context, runID, hostWorkspace s
 	}
 
 	// Ensure the container is removed only after logs have been collected or on setup failure.
-	defer r.removeContainer(created.ID)
+	containerRemoved := false
+	defer func() {
+		if !containerRemoved {
+			r.removeContainer(created.ID)
+		}
+	}()
 
 	if err := r.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
 		return &Result{ExitCode: -1, Logs: liveBuf.String()}, fmt.Errorf("start container %q for task %q: %w", created.ID, task.ID, err)
@@ -241,6 +246,11 @@ func (r *DockerRunner) RunTaskStream(ctx context.Context, runID, hostWorkspace s
 	logErrCh := r.streamContainerLogs(ctx, created.ID, liveBuf)
 
 	exitCode, waitErr := r.waitContainer(ctx, created.ID)
+	if waitErr != nil && ctx.Err() != nil {
+		// Stop and remove the running container promptly so log streaming finishes instead of blocking.
+		r.removeContainer(created.ID)
+		containerRemoved = true
+	}
 	logErr := <-logErrCh
 	logs := liveBuf.String()
 

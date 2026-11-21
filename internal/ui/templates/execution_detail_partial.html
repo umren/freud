@@ -16,6 +16,17 @@
   <div class="toolbar">
     {{if eq .Run.Status "RUNNING"}}
       <span class="badge badge-neutral">Live 1s</span>
+      {{if .CanKill}}
+      <button type="button"
+              class="btn btn-danger"
+              x-data="{ killing: false }"
+              :disabled="killing"
+              x-text="killing ? 'Killing...' : 'Kill Run'"
+              @click="killing = true"
+              hx-post="/executions/{{.Run.ID}}/kill"
+              hx-target="#execution-live"
+              hx-swap="outerHTML">Kill Run</button>
+      {{end}}
     {{end}}
     <span class="badge badge-{{.Run.StatusSlug}}"><span class="dot"></span>{{.Run.Status}}</span>
   </div>

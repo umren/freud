@@ -21,6 +21,11 @@ type AsyncFlowRunner interface {
 	StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error)
 }
 
+// KillableFlowRunner is an optional capability for stopping currently running workflow executions.
+type KillableFlowRunner interface {
+	Kill(runID string) error
+}
+
 // Config configures the embedded web UI server.
 type Config struct {
 	Addr        string
@@ -124,6 +129,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /executions", s.handleExecutions)
 	mux.HandleFunc("GET /partials/executions", s.handleExecutionsPartial)
 	mux.HandleFunc("GET /executions/{id}", s.handleExecutionDetail)
+	mux.HandleFunc("POST /executions/{id}/kill", s.handleKillExecution)
 	mux.HandleFunc("GET /partials/executions/{id}", s.handleExecutionDetailPartial)
 	mux.HandleFunc("GET /includes", s.handleIncludes)
 	return mux

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,13 @@ const (
 	scriptsDirName       = ".scripts"
 	logFlushInterval     = 250 * time.Millisecond
 	maxSubflowDepth      = 10
+)
+
+var (
+	// ErrRunNotActive is returned when Kill is called for a run that is no longer running.
+	ErrRunNotActive = errors.New("run is not active")
+	// ErrRunKilled is returned when a workflow run is stopped via Kill.
+	ErrRunKilled = errors.New("workflow run killed")
 )
 
 // TaskRunner defines the execution backend for running a single workflow task.
@@ -44,6 +52,15 @@ type Engine struct {
 	flowsDir       string
 	baseEnv        map[string]string
 	wg             sync.WaitGroup
+
+	runsMu     sync.Mutex
+	activeRuns map[string]*activeRun
+}
+
+type activeRun struct {
+	cancel   context.CancelFunc
+	killed   bool
+	children []string
 }
 
 type runOptions struct {
@@ -62,6 +79,7 @@ func New(store *db.Store, taskRunner TaskRunner, workspacesBase string) *Engine 
 		store:          store,
 		runner:         taskRunner,
 		workspacesBase: workspacesBase,
+		activeRuns:     make(map[string]*activeRun),
 	}
 }
 
@@ -80,6 +98,88 @@ func (e *Engine) Wait() {
 	e.wg.Wait()
 }
 
+// Kill cancels a currently active workflow run and any active child subflows it spawned.
+func (e *Engine) Kill(runID string) error {
+	e.runsMu.Lock()
+	root, ok := e.activeRuns[runID]
+	if !ok {
+		e.runsMu.Unlock()
+		return fmt.Errorf("%w: %s", ErrRunNotActive, runID)
+	}
+
+	var cancels []context.CancelFunc
+	visited := make(map[string]bool)
+	var collect func(id string, ar *activeRun)
+	collect = func(id string, ar *activeRun) {
+		if visited[id] || ar == nil {
+			return
+		}
+		visited[id] = true
+		ar.killed = true
+		if ar.cancel != nil {
+			cancels = append(cancels, ar.cancel)
+		}
+		for _, childID := range ar.children {
+			if child, exists := e.activeRuns[childID]; exists {
+				collect(childID, child)
+			}
+		}
+	}
+	collect(runID, root)
+	e.runsMu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return nil
+}
+
+func (e *Engine) registerActiveRun(runID, parentRunID string, cancel context.CancelFunc) {
+	e.runsMu.Lock()
+	ar := &activeRun{cancel: cancel}
+	e.activeRuns[runID] = ar
+	shouldCancelNow := false
+	if parentRunID != "" {
+		if parent, ok := e.activeRuns[parentRunID]; ok {
+			parent.children = append(parent.children, runID)
+			if parent.killed {
+				ar.killed = true
+				shouldCancelNow = true
+			}
+		}
+	}
+	e.runsMu.Unlock()
+
+	if shouldCancelNow && cancel != nil {
+		cancel()
+	}
+}
+
+func (e *Engine) unregisterActiveRun(runID, parentRunID string) {
+	e.runsMu.Lock()
+	delete(e.activeRuns, runID)
+	if parentRunID != "" {
+		if parent, ok := e.activeRuns[parentRunID]; ok {
+			filtered := parent.children[:0]
+			for _, id := range parent.children {
+				if id != runID {
+					filtered = append(filtered, id)
+				}
+			}
+			parent.children = filtered
+		}
+	}
+	e.runsMu.Unlock()
+}
+
+func (e *Engine) isKilled(runID string) bool {
+	e.runsMu.Lock()
+	ar, ok := e.activeRuns[runID]
+	killed := ok && ar.killed
+	e.runsMu.Unlock()
+	return killed
+}
+
 // Run executes all tasks in the workflow in topological order and persists run metadata to SQLite.
 func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error) {
 	opts := runOptions{
@@ -90,7 +190,14 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 	if err != nil {
 		return "", err
 	}
-	if err := e.executeRun(ctx, runID, hostWorkspace, wf, orderedTasks, opts); err != nil {
+	runCtx, cancel := context.WithCancel(ctx)
+	e.registerActiveRun(runID, opts.parentRunID, cancel)
+	defer func() {
+		cancel()
+		e.unregisterActiveRun(runID, opts.parentRunID)
+	}()
+
+	if err := e.executeRun(runCtx, runID, hostWorkspace, wf, orderedTasks, opts); err != nil {
 		return runID, err
 	}
 	return runID, nil
@@ -112,9 +219,14 @@ func (e *Engine) startAsyncWithOptions(ctx context.Context, wf *workflow.Workflo
 		return "", nil, err
 	}
 
+	runCtx, cancel := context.WithCancel(ctx)
+	e.registerActiveRun(runID, opts.parentRunID, cancel)
+
 	doneCh := make(chan error, 1)
 	go func() {
-		doneCh <- e.executeRun(ctx, runID, hostWorkspace, wf, orderedTasks, opts)
+		defer cancel()
+		defer e.unregisterActiveRun(runID, opts.parentRunID)
+		doneCh <- e.executeRun(runCtx, runID, hostWorkspace, wf, orderedTasks, opts)
 		close(doneCh)
 	}()
 	return runID, doneCh, nil
@@ -149,6 +261,10 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 	fmt.Printf("[engine] Starting workflow %q (run_id=%s, workspace=%s)\n", wf.Name, runID, hostWorkspace)
 
 	for _, task := range orderedTasks {
+		if ctx.Err() != nil {
+			return e.finishCanceledRun(runID, wf.Name, ctx.Err())
+		}
+
 		if task.Flow != "" {
 			fmt.Printf("[engine] Running subflow task %q (flow=%q, wait=%v)\n", task.ID, task.Flow, task.ShouldWait())
 		} else if task.Image != "" {
@@ -159,6 +275,9 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 
 		taskRunID, err := e.store.CreateTaskRunWithMeta(ctx, runID, task.ID, task.Runtime, task.Image)
 		if err != nil {
+			if e.isKilled(runID) {
+				return e.finishCanceledRun(runID, wf.Name, ctx.Err())
+			}
 			e.markRunFailed(runID)
 			return fmt.Errorf("record task %q start: %w", task.ID, err)
 		}
@@ -189,6 +308,18 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 			logs = res.Logs
 		}
 
+		if e.isKilled(runID) {
+			if logs != "" {
+				logs += "\n"
+			}
+			logs += "[freud] Execution killed by user"
+			e.markTaskFinished(taskRunID, db.StatusKilled, exitCode, logs)
+			e.markRunStatus(runID, db.StatusKilled)
+			fmt.Printf("[engine] Task %q KILLED\n", task.ID)
+			fmt.Printf("[engine] Workflow %q (run_id=%s) KILLED\n", wf.Name, runID)
+			return fmt.Errorf("task %q: %w", task.ID, ErrRunKilled)
+		}
+
 		if runErr != nil || exitCode != 0 {
 			if runErr != nil {
 				if logs != "" {
@@ -207,20 +338,36 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 			return fmt.Errorf("task %q exited with non-zero code %d", task.ID, exitCode)
 		}
 
-		if err := e.store.FinishTaskRun(ctx, taskRunID, db.StatusSuccess, exitCode, logs); err != nil {
-			e.markRunFailed(runID)
-			return fmt.Errorf("record task %q completion: %w", task.ID, err)
-		}
-
+		e.markTaskFinished(taskRunID, db.StatusSuccess, exitCode, logs)
 		fmt.Printf("[engine] Task %q SUCCEEDED (exit_code=%d)\n", task.ID, exitCode)
 	}
 
+	if e.isKilled(runID) {
+		return e.finishCanceledRun(runID, wf.Name, ctx.Err())
+	}
+
 	if err := e.store.FinishRun(ctx, runID, db.StatusSuccess); err != nil {
+		if e.isKilled(runID) {
+			return e.finishCanceledRun(runID, wf.Name, ctx.Err())
+		}
 		return fmt.Errorf("record workflow run completion: %w", err)
 	}
 
 	fmt.Printf("[engine] Workflow %q (run_id=%s) SUCCEEDED\n", wf.Name, runID)
 	return nil
+}
+
+func (e *Engine) finishCanceledRun(runID, workflowName string, ctxErr error) error {
+	if e.isKilled(runID) {
+		e.markRunStatus(runID, db.StatusKilled)
+		fmt.Printf("[engine] Workflow %q (run_id=%s) KILLED\n", workflowName, runID)
+		return ErrRunKilled
+	}
+	e.markRunFailed(runID)
+	if ctxErr != nil {
+		return ctxErr
+	}
+	return context.Canceled
 }
 
 func (e *Engine) executeSubflowTask(
@@ -265,7 +412,12 @@ func (e *Engine) executeSubflowTask(
 		flowStack:    nextStack,
 	}
 
-	childRunID, childDone, err := e.startAsyncWithOptions(ctx, childWF, childOpts)
+	childStartCtx := ctx
+	if !task.ShouldWait() {
+		childStartCtx = context.WithoutCancel(ctx)
+	}
+
+	childRunID, childDone, err := e.startAsyncWithOptions(childStartCtx, childWF, childOpts)
 	if err != nil {
 		return &runner.Result{ExitCode: 1}, fmt.Errorf("start subflow %q: %w", task.Flow, err)
 	}
@@ -362,11 +514,15 @@ func (e *Engine) markTaskFinished(taskRunID int64, status string, exitCode int64
 }
 
 func (e *Engine) markRunFailed(runID string) {
+	e.markRunStatus(runID, db.StatusFailed)
+}
+
+func (e *Engine) markRunStatus(runID, status string) {
 	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := e.store.FinishRun(dbCtx, runID, db.StatusFailed); err != nil {
-		fmt.Fprintf(os.Stderr, "[engine] Warning: failed to persist run %s FAILED status: %v\n", runID, err)
+	if err := e.store.FinishRun(dbCtx, runID, status); err != nil {
+		fmt.Fprintf(os.Stderr, "[engine] Warning: failed to persist run %s %s status: %v\n", runID, status, err)
 	}
 }
 

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -377,5 +378,90 @@ tasks:
 	}
 	if _, err := eng.Run(context.Background(), cycWF); err == nil || !strings.Contains(err.Error(), "subflow cycle detected") {
 		t.Fatalf("expected subflow cycle error, got %v", err)
+	}
+}
+
+type blockingKillRunner struct {
+	startedCh chan struct{}
+	executed  []string
+}
+
+func (r *blockingKillRunner) RunTask(ctx context.Context, _ string, _ string, task workflow.Task) (*runner.Result, error) {
+	r.executed = append(r.executed, task.ID)
+	if task.ID == "wait_step" {
+		close(r.startedCh)
+		<-ctx.Done()
+		return &runner.Result{ExitCode: -1, Logs: "partial log before kill"}, ctx.Err()
+	}
+	return &runner.Result{ExitCode: 0, Logs: "should not run"}, nil
+}
+
+func TestEngineKillActiveRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tmpDir, "orchestrator.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	br := &blockingKillRunner{startedCh: make(chan struct{})}
+	eng := New(store, br, filepath.Join(tmpDir, "workspaces"))
+
+	wf := &workflow.Workflow{
+		Name: "killable-flow",
+		Tasks: []workflow.Task{
+			{ID: "wait_step", Runtime: workflow.RuntimePython, Script: "import time; time.sleep(10)"},
+			{ID: "second_step", Runtime: workflow.RuntimePython, DependsOn: []string{"wait_step"}, Script: "print(2)"},
+		},
+	}
+
+	runID, doneCh, err := eng.StartAsync(context.Background(), wf)
+	if err != nil {
+		t.Fatalf("StartAsync failed: %v", err)
+	}
+
+	select {
+	case <-br.startedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for task to start")
+	}
+
+	if err := eng.Kill(runID); err != nil {
+		t.Fatalf("Kill failed: %v", err)
+	}
+
+	select {
+	case runErr := <-doneCh:
+		if !errors.Is(runErr, ErrRunKilled) {
+			t.Fatalf("expected ErrRunKilled, got %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for killed run to finish")
+	}
+
+	runRec, err := store.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+	if runRec.Status != db.StatusKilled {
+		t.Fatalf("expected run status %s, got %s", db.StatusKilled, runRec.Status)
+	}
+
+	tasks, err := store.ListTaskRuns(context.Background(), runID)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("expected 1 task_run (second_step skipped), got %d (err=%v)", len(tasks), err)
+	}
+	if tasks[0].Status != db.StatusKilled {
+		t.Fatalf("expected task status %s, got %s", db.StatusKilled, tasks[0].Status)
+	}
+	if !strings.Contains(tasks[0].Logs.String, "partial log before kill") || !strings.Contains(tasks[0].Logs.String, "killed by user") {
+		t.Fatalf("unexpected killed task logs: %q", tasks[0].Logs.String)
+	}
+	if len(br.executed) != 1 || br.executed[0] != "wait_step" {
+		t.Fatalf("expected only wait_step to execute, got %v", br.executed)
+	}
+
+	if err := eng.Kill(runID); !errors.Is(err, ErrRunNotActive) {
+		t.Fatalf("expected ErrRunNotActive after completion, got %v", err)
 	}
 }

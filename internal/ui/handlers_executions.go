@@ -3,12 +3,14 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"freud/internal/db"
+	"freud/internal/engine"
 )
 
 type runRowView struct {
@@ -51,6 +53,7 @@ type executionDetailViewData struct {
 	Tasks     []taskRunView
 	ChildRuns []runRowView
 	DAG       DAGGraph
+	CanKill   bool
 }
 
 type runSnapshot struct {
@@ -66,7 +69,7 @@ type runSnapshot struct {
 func (s *Server) buildExecutionsData(ctx context.Context, statusFilter string) (executionsViewData, error) {
 	statusFilter = strings.ToUpper(strings.TrimSpace(statusFilter))
 	switch statusFilter {
-	case "", db.StatusSuccess, db.StatusFailed, db.StatusRunning:
+	case "", db.StatusSuccess, db.StatusFailed, db.StatusRunning, db.StatusKilled:
 	default:
 		statusFilter = ""
 	}
@@ -216,12 +219,14 @@ func (s *Server) buildExecutionDetailData(ctx context.Context, runID string) (ex
 		}
 	}
 
+	_, canKill := s.runner.(KillableFlowRunner)
 	return executionDetailViewData{
 		basePageData: s.newBaseData(runRec.WorkflowName+" · "+runRec.ID, "executions", stats.Running),
 		Run:          runView,
 		Tasks:        taskViews,
 		ChildRuns:    toRunRowViews(childRecs, now),
 		DAG:          dag,
+		CanKill:      canKill,
 	}, true, nil
 }
 
@@ -249,6 +254,44 @@ func (s *Server) handleExecutionDetailPartial(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.renderPartial(w, "execution_detail_content", data)
+}
+
+func (s *Server) handleKillExecution(w http.ResponseWriter, r *http.Request) {
+	kr, ok := s.runner.(KillableFlowRunner)
+	if !ok {
+		http.Error(w, "execution killer is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	runID := r.PathValue("id")
+	if _, err := s.store.GetRun(r.Context(), runID); err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := kr.Kill(runID); err != nil && !errors.Is(err, engine.ErrRunNotActive) {
+		http.Error(w, fmt.Sprintf("kill run %q: %v", runID, err), http.StatusInternalServerError)
+		return
+	}
+
+	if r.Header.Get("HX-Request") == "true" {
+		data, found, err := s.buildExecutionDetailData(r.Context(), runID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		s.renderPartial(w, "execution_detail_content", data)
+		return
+	}
+	http.Redirect(w, r, "/executions/"+runID, http.StatusSeeOther)
 }
 
 func toRunRowViews(records []db.RunRecord, now time.Time) []runRowView {

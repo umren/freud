@@ -13,6 +13,7 @@ const (
 	StatusRunning = "RUNNING"
 	StatusSuccess = "SUCCESS"
 	StatusFailed  = "FAILED"
+	StatusKilled  = "KILLED"
 )
 
 // RunRecord represents a row in the runs table.
@@ -49,6 +50,7 @@ type RunStats struct {
 	Success int
 	Failed  int
 	Running int
+	Killed  int
 }
 
 // Store wraps SQLite persistence for workflow runs and task runs.
@@ -325,10 +327,11 @@ func (s *Store) GetRunStats(ctx context.Context) (RunStats, error) {
 			COUNT(*) AS total,
 			COALESCE(SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS success_cnt,
 			COALESCE(SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed_cnt,
-			COALESCE(SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END), 0) AS running_cnt
+			COALESCE(SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END), 0) AS running_cnt,
+			COALESCE(SUM(CASE WHEN status = 'KILLED' THEN 1 ELSE 0 END), 0) AS killed_cnt
 		FROM runs
 	`)
-	if err := row.Scan(&stats.Total, &stats.Success, &stats.Failed, &stats.Running); err != nil {
+	if err := row.Scan(&stats.Total, &stats.Success, &stats.Failed, &stats.Running, &stats.Killed); err != nil {
 		return stats, fmt.Errorf("query run stats: %w", err)
 	}
 	return stats, nil

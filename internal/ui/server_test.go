@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"freud/internal/db"
+	"freud/internal/engine"
 	"freud/internal/workflow"
 )
 
@@ -217,5 +218,88 @@ func TestUIRunFlowNowAndRedirect(t *testing.T) {
 	h.ServeHTTP(execRec, execReq)
 	if execRec.Code != http.StatusOK || !strings.Contains(execRec.Body.String(), "manual-flow") {
 		t.Fatalf("expected 200 OK on %s, got %d", loc, execRec.Code)
+	}
+}
+
+type mockKillRunner struct {
+	store    *db.Store
+	killedID string
+}
+
+func (m *mockKillRunner) StartAsync(_ context.Context, _ *workflow.Workflow) (string, <-chan error, error) {
+	ch := make(chan error, 1)
+	close(ch)
+	return "unused", ch, nil
+}
+
+func (m *mockKillRunner) Kill(runID string) error {
+	if runID != "run-live-1" {
+		return engine.ErrRunNotActive
+	}
+	m.killedID = runID
+	return m.store.FinishRun(context.Background(), runID, db.StatusKilled)
+}
+
+func TestUIKillExecution(t *testing.T) {
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatalf("mkdir flows: %v", err)
+	}
+
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.CreateRun(context.Background(), "run-live-1", "kill-demo"); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	kr := &mockKillRunner{store: store}
+	srv, err := NewServer(store, Config{
+		FlowsDir: flowsDir,
+		Runner:   kr,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	h := srv.Handler()
+
+	// Running execution detail page must show the Kill Run button.
+	getReq := httptest.NewRequest(http.MethodGet, "/executions/run-live-1", nil)
+	getRec := httptest.NewRecorder()
+	h.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK || !strings.Contains(getRec.Body.String(), `/executions/run-live-1/kill`) {
+		t.Fatalf("expected Kill Run button on running execution, code=%d", getRec.Code)
+	}
+
+	// HTMX POST /executions/{id}/kill should invoke Kill and render updated KILLED status.
+	killReq := httptest.NewRequest(http.MethodPost, "/executions/run-live-1/kill", nil)
+	killReq.Header.Set("HX-Request", "true")
+	killRec := httptest.NewRecorder()
+	h.ServeHTTP(killRec, killReq)
+	if killRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from HTMX kill, got %d: %s", killRec.Code, killRec.Body.String())
+	}
+	if kr.killedID != "run-live-1" || !strings.Contains(killRec.Body.String(), "KILLED") {
+		t.Fatalf("expected killedID=run-live-1 and KILLED badge, got killedID=%q body=%s", kr.killedID, killRec.Body.String())
+	}
+
+	// Filtering /executions by status=KILLED returns the killed run.
+	listReq := httptest.NewRequest(http.MethodGet, "/executions?status=KILLED", nil)
+	listRec := httptest.NewRecorder()
+	h.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK || !strings.Contains(listRec.Body.String(), "run-live-1") {
+		t.Fatalf("expected run-live-1 in KILLED filter, code=%d", listRec.Code)
+	}
+
+	// Unknown execution ID returns 404.
+	missingReq := httptest.NewRequest(http.MethodPost, "/executions/no-such-run/kill", nil)
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown run kill, got %d", missingRec.Code)
 	}
 }
