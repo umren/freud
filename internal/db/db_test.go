@@ -136,3 +136,46 @@ func TestStoreQueriesAndIncrementalLogs(t *testing.T) {
 		t.Fatalf("unexpected latest map: %+v", latest)
 	}
 }
+
+func TestStoreParentChildRunsAndKilledStats(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "subflows.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.CreateRun(ctx, "parent-1", "main-flow"); err != nil {
+		t.Fatalf("CreateRun parent-1: %v", err)
+	}
+	if err := store.CreateRunWithParent(ctx, "child-1", "sub-flow", "", "parent-1", "call_sub"); err != nil {
+		t.Fatalf("CreateRunWithParent: %v", err)
+	}
+	if err := store.FinishRun(ctx, "child-1", StatusKilled); err != nil {
+		t.Fatalf("FinishRun child-1: %v", err)
+	}
+	if err := store.FinishRun(ctx, "parent-1", StatusKilled); err != nil {
+		t.Fatalf("FinishRun parent-1: %v", err)
+	}
+
+	children, err := store.ListChildRuns(ctx, "parent-1")
+	if err != nil || len(children) != 1 {
+		t.Fatalf("expected 1 child run, got %+v, err=%v", children, err)
+	}
+	if children[0].ID != "child-1" || children[0].ParentTaskID.String != "call_sub" {
+		t.Fatalf("unexpected child record: %+v", children[0])
+	}
+
+	byWF, err := store.ListRunsByWorkflow(ctx, "sub-flow", 10)
+	if err != nil || len(byWF) != 1 || byWF[0].ID != "child-1" {
+		t.Fatalf("ListRunsByWorkflow mismatch: %+v, err=%v", byWF, err)
+	}
+
+	stats, err := store.GetRunStats(ctx)
+	if err != nil {
+		t.Fatalf("GetRunStats: %v", err)
+	}
+	if stats.Total != 2 || stats.Killed != 2 {
+		t.Fatalf("expected Total=2 Killed=2, got %+v", stats)
+	}
+}

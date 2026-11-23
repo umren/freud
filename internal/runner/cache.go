@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -17,9 +16,8 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/jsonmessage"
-	"github.com/mattn/go-isatty"
 
+	"freud/internal/term"
 	"freud/internal/workflow"
 )
 
@@ -133,9 +131,11 @@ func createDockerfileTarContext(dockerfile string) (io.Reader, error) {
 func (r *DockerRunner) ensureDependencyImage(ctx context.Context, baseImage, baseImageID string, task workflow.Task, logOut io.Writer) (string, error) {
 	cacheTag := computeCacheTag(baseImageID, task.Runtime, task.Dependencies)
 
+	out := r.stdout()
+	c := term.ColorEnabledWriter(out)
 	if !r.noCache {
 		if _, err := r.cli.ImageInspect(ctx, cacheTag); err == nil {
-			fmt.Printf("[runner] Using cached dependency image %s\n", cacheTag)
+			fmt.Fprintf(out, "%s Using cached dependency image %s\n", term.Tag(c, "runner"), term.Muted(c, cacheTag))
 			return cacheTag, nil
 		} else if !client.IsErrNotFound(err) {
 			return "", fmt.Errorf("inspect cached image %q: %w", cacheTag, err)
@@ -161,10 +161,13 @@ func (r *DockerRunner) ensureDependencyImage(ctx context.Context, baseImage, bas
 	copy(sortedDeps, task.Dependencies)
 	sort.Strings(sortedDeps)
 
-	msg := fmt.Sprintf("[runner] Building cached dependency image %s (from %s)...\n", cacheTag, baseImage)
-	fmt.Print(msg)
+	fmt.Fprintf(out, "%s Building cached dependency image %s %s...\n",
+		term.Tag(c, "runner"),
+		term.Key(c, cacheTag),
+		term.Muted(c, fmt.Sprintf("(from %s)", baseImage)),
+	)
 	if logOut != nil {
-		_, _ = io.WriteString(logOut, msg)
+		_, _ = fmt.Fprintf(logOut, "[runner] Building cached dependency image %s (from %s)...\n", cacheTag, baseImage)
 	}
 	buildResp, err := r.cli.ImageBuild(ctx, tarCtx, build.ImageBuildOptions{
 		Tags:        []string{cacheTag},
@@ -184,9 +187,7 @@ func (r *DockerRunner) ensureDependencyImage(ctx context.Context, baseImage, bas
 	}
 	defer buildResp.Body.Close()
 
-	fd := os.Stdout.Fd()
-	isTerm := isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
-	if err := jsonmessage.DisplayJSONMessagesStream(buildResp.Body, os.Stdout, fd, isTerm, nil); err != nil {
+	if err := displayDockerStream(buildResp.Body, out); err != nil {
 		return "", fmt.Errorf("build cached image %q: %w", cacheTag, err)
 	}
 

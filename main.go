@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,7 +17,10 @@ import (
 	"freud/internal/db"
 	"freud/internal/engine"
 	"freud/internal/env"
+	"freud/internal/format"
 	"freud/internal/runner"
+	"freud/internal/term"
+	"freud/internal/tui"
 	"freud/internal/ui"
 	"freud/internal/workflow"
 )
@@ -31,7 +35,8 @@ const (
 
 func main() {
 	if err := runCLI(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "[freud] Error: %v\n", err)
+		c := term.StderrColor()
+		fmt.Fprintf(os.Stderr, "%s %s: %v\n", term.Tag(c, "freud"), term.Status(c, "Error"), err)
 		os.Exit(1)
 	}
 }
@@ -49,6 +54,8 @@ func runCLI(args []string) error {
 		return runCacheCmd(args[1:])
 	case "dream":
 		return runDreamCmd(args[1:])
+	case "tui":
+		return runTUICmd(args[1:])
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -76,12 +83,19 @@ func runWorkflowCmd(args []string) error {
 		return err
 	}
 
+	c := term.StdoutColor()
+	fmt.Print(term.Banner(c))
+
 	baseEnv, loadedFiles, err := loadEnvironment(*envFile, workflowPath)
 	if err != nil {
 		return err
 	}
 	if len(loadedFiles) > 0 {
-		fmt.Printf("[freud] Loaded %d env variable(s) from %s\n", len(baseEnv), strings.Join(loadedFiles, ", "))
+		fmt.Printf("%s Loaded %s env variable(s) from %s\n",
+			term.Tag(c, "freud"),
+			term.Bold(c, fmt.Sprintf("%d", len(baseEnv))),
+			term.Key(c, strings.Join(loadedFiles, ", ")),
+		)
 	}
 
 	store, err := db.Open(dbPath)
@@ -137,12 +151,19 @@ func runDreamCmd(args []string) error {
 	}
 	defer store.Close()
 
+	c := term.StdoutColor()
+	fmt.Print(term.Banner(c))
+
 	baseEnv, loadedFiles, err := loadEnvironment(*envFile, "")
 	if err != nil {
 		return err
 	}
 	if len(loadedFiles) > 0 {
-		fmt.Printf("[dream] Loaded %d env variable(s) from %s\n", len(baseEnv), strings.Join(loadedFiles, ", "))
+		fmt.Printf("%s Loaded %s env variable(s) from %s\n",
+			term.Tag(c, "dream"),
+			term.Bold(c, fmt.Sprintf("%d", len(baseEnv))),
+			term.Key(c, strings.Join(loadedFiles, ", ")),
+		)
 	}
 
 	dockerRunner, err := runner.NewDockerRunner()
@@ -173,7 +194,7 @@ func runDreamCmd(args []string) error {
 
 	if *schedulerOn {
 		go ui.StartScheduler(ctx, eng, *flowsDir)
-		fmt.Printf("[scheduler] Cron scheduler enabled (watching %s/)\n", *flowsDir)
+		fmt.Printf("%s Cron scheduler enabled (watching %s)\n", term.Tag(c, "scheduler"), term.Key(c, *flowsDir+"/"))
 	}
 
 	httpServer := &http.Server{
@@ -184,7 +205,7 @@ func runDreamCmd(args []string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Printf("[dream] Freud Web UI listening on http://localhost%s\n", addr)
+		fmt.Printf("%s Freud Web UI listening on %s\n", term.Tag(c, "dream"), term.Key(c, "http://localhost"+addr))
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -225,23 +246,31 @@ func runCacheCmd(args []string) error {
 		if err != nil {
 			return err
 		}
+		c := term.StdoutColor()
 		if len(images) == 0 {
-			fmt.Println("No cached dependency images found.")
+			fmt.Println(term.Muted(c, "No cached dependency images found."))
 			return nil
 		}
 
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "TAG\tRUNTIME\tBASE IMAGE\tDEPENDENCIES\tSIZE\tCREATED")
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			term.Bold(c, "TAG"),
+			term.Bold(c, "RUNTIME"),
+			term.Bold(c, "BASE IMAGE"),
+			term.Bold(c, "DEPENDENCIES"),
+			term.Bold(c, "SIZE"),
+			term.Bold(c, "CREATED"),
+		)
 		for _, img := range images {
 			fmt.Fprintf(
 				tw,
 				"%s\t%s\t%s\t%s\t%s\t%s\n",
-				img.Tag,
+				term.Key(c, img.Tag),
 				img.Runtime,
 				img.BaseImage,
 				img.Deps,
-				formatBytes(img.Size),
-				img.CreatedAt.Format("2006-01-02 15:04:05Z"),
+				format.Bytes(img.Size),
+				term.Muted(c, img.CreatedAt.Format("2006-01-02 15:04:05Z")),
 			)
 		}
 		return tw.Flush()
@@ -251,7 +280,12 @@ func runCacheCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("[cache] Removed %d cached image(s), reclaimed %s\n", removed, formatBytes(reclaimed))
+		c := term.StdoutColor()
+		fmt.Printf("%s Removed %s cached image(s), reclaimed %s\n",
+			term.Tag(c, "cache"),
+			term.Bold(c, fmt.Sprintf("%d", removed)),
+			term.Key(c, format.Bytes(reclaimed)),
+		)
 		return nil
 
 	default:
@@ -271,23 +305,69 @@ func loadEnvironment(explicitPath, workflowPath string) (map[string]string, []st
 	return env.LoadDefault(workflowPath)
 }
 
-func formatBytes(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
+func runTUICmd(args []string) error {
+	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	flowsDir := fs.String("flows-dir", defaultFlowsDir, "Directory containing workflow YAML files")
+	envFile := fs.String("env-file", "", "Optional path to a .env file for TUI-triggered and scheduled runs")
+	schedulerOn := fs.Bool("scheduler", false, "Enable background cron execution for scheduled flows")
+	noCache := fs.Bool("no-cache", false, "Bypass and rebuild cached dependency images")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
+
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return err
 	}
-	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
+	defer store.Close()
+
+	baseEnv, _, err := loadEnvironment(*envFile, "")
+	if err != nil {
+		return err
+	}
+
+	dockerRunner, err := runner.NewDockerRunner()
+	if err != nil {
+		return err
+	}
+	defer dockerRunner.Close()
+	dockerRunner.SetNoCache(*noCache)
+	dockerRunner.SetOutput(io.Discard, io.Discard)
+
+	eng := engine.New(store, dockerRunner, workspacesDir)
+	eng.SetEnv(baseEnv)
+	eng.SetFlowsDir(*flowsDir)
+	eng.SetOutput(io.Discard, io.Discard)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if *schedulerOn {
+		sched := ui.NewScheduler(eng, *flowsDir)
+		sched.SetOutput(io.Discard, io.Discard)
+		go sched.Run(ctx)
+	}
+
+	err = tui.Run(tui.Config{
+		Store:       store,
+		FlowsDir:    *flowsDir,
+		Runner:      eng,
+		Ctx:         ctx,
+		SchedulerOn: *schedulerOn,
+	})
+	stop()
+	eng.Wait()
+	return err
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  freud run [--env-file <path/to/.env>] [--no-cache] <path/to/workflow.yaml>")
-	fmt.Fprintln(os.Stderr, "  freud dream [--port 4321] [--flows-dir flows] [--includes-dir includes] [--scheduler]")
-	fmt.Fprintln(os.Stderr, "  freud cache ls")
-	fmt.Fprintln(os.Stderr, "  freud cache clear")
+	c := term.StderrColor()
+	fmt.Fprint(os.Stderr, term.Banner(c))
+	fmt.Fprintln(os.Stderr, term.Bold(c, "Usage:"))
+	fmt.Fprintf(os.Stderr, "  %s [--env-file <path/to/.env>] [--no-cache] <path/to/workflow.yaml>\n", term.Key(c, "freud run"))
+	fmt.Fprintf(os.Stderr, "  %s [--flows-dir flows] [--env-file <path/to/.env>] [--scheduler] [--no-cache]\n", term.Key(c, "freud tui"))
+	fmt.Fprintf(os.Stderr, "  %s [--port 4321] [--flows-dir flows] [--includes-dir includes] [--scheduler]\n", term.Key(c, "freud dream"))
+	fmt.Fprintf(os.Stderr, "  %s\n", term.Key(c, "freud cache ls"))
+	fmt.Fprintf(os.Stderr, "  %s\n", term.Key(c, "freud cache clear"))
 }

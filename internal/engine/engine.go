@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"freud/internal/db"
 	"freud/internal/env"
 	"freud/internal/runner"
+	"freud/internal/term"
 	"freud/internal/workflow"
 )
 
@@ -51,6 +53,8 @@ type Engine struct {
 	workspacesBase string
 	flowsDir       string
 	baseEnv        map[string]string
+	out            io.Writer
+	errOut         io.Writer
 	wg             sync.WaitGroup
 
 	runsMu     sync.Mutex
@@ -79,8 +83,30 @@ func New(store *db.Store, taskRunner TaskRunner, workspacesBase string) *Engine 
 		store:          store,
 		runner:         taskRunner,
 		workspacesBase: workspacesBase,
+		out:            os.Stdout,
+		errOut:         os.Stderr,
 		activeRuns:     make(map[string]*activeRun),
 	}
+}
+
+// SetOutput overrides stdout and stderr writers used for engine status logging.
+func (e *Engine) SetOutput(out, errOut io.Writer) {
+	e.out = out
+	e.errOut = errOut
+}
+
+func (e *Engine) stdout() io.Writer {
+	if e.out != nil {
+		return e.out
+	}
+	return os.Stdout
+}
+
+func (e *Engine) stderr() io.Writer {
+	if e.errOut != nil {
+		return e.errOut
+	}
+	return os.Stderr
 }
 
 // SetEnv sets base environment variables (such as those loaded from .env) injected into every task.
@@ -258,7 +284,13 @@ func (e *Engine) prepareRun(ctx context.Context, wf *workflow.Workflow, opts run
 }
 
 func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf *workflow.Workflow, orderedTasks []workflow.Task, opts runOptions) error {
-	fmt.Printf("[engine] Starting workflow %q (run_id=%s, workspace=%s)\n", wf.Name, runID, hostWorkspace)
+	out := e.stdout()
+	c := term.ColorEnabledWriter(out)
+	fmt.Fprintf(out, "%s Starting workflow %s %s\n",
+		term.Tag(c, "engine"),
+		term.Key(c, fmt.Sprintf("%q", wf.Name)),
+		term.Muted(c, fmt.Sprintf("(run_id=%s, workspace=%s)", runID, hostWorkspace)),
+	)
 
 	for _, task := range orderedTasks {
 		if ctx.Err() != nil {
@@ -266,11 +298,23 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 		}
 
 		if task.Flow != "" {
-			fmt.Printf("[engine] Running subflow task %q (flow=%q, wait=%v)\n", task.ID, task.Flow, task.ShouldWait())
+			fmt.Fprintf(out, "%s Running subflow task %s %s\n",
+				term.Tag(c, "engine"),
+				term.Key(c, fmt.Sprintf("%q", task.ID)),
+				term.Muted(c, fmt.Sprintf("(flow=%q, wait=%v)", task.Flow, task.ShouldWait())),
+			)
 		} else if task.Image != "" {
-			fmt.Printf("[engine] Running task %q (runtime=%s, image=%s)\n", task.ID, task.Runtime, task.Image)
+			fmt.Fprintf(out, "%s Running task %s %s\n",
+				term.Tag(c, "engine"),
+				term.Key(c, fmt.Sprintf("%q", task.ID)),
+				term.Muted(c, fmt.Sprintf("(runtime=%s, image=%s)", task.Runtime, task.Image)),
+			)
 		} else {
-			fmt.Printf("[engine] Running task %q (runtime=%s)\n", task.ID, task.Runtime)
+			fmt.Fprintf(out, "%s Running task %s %s\n",
+				term.Tag(c, "engine"),
+				term.Key(c, fmt.Sprintf("%q", task.ID)),
+				term.Muted(c, fmt.Sprintf("(runtime=%s)", task.Runtime)),
+			)
 		}
 
 		taskRunID, err := e.store.CreateTaskRunWithMeta(ctx, runID, task.ID, task.Runtime, task.Image)
@@ -315,8 +359,13 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 			logs += "[freud] Execution killed by user"
 			e.markTaskFinished(taskRunID, db.StatusKilled, exitCode, logs)
 			e.markRunStatus(runID, db.StatusKilled)
-			fmt.Printf("[engine] Task %q KILLED\n", task.ID)
-			fmt.Printf("[engine] Workflow %q (run_id=%s) KILLED\n", wf.Name, runID)
+			fmt.Fprintf(out, "%s Task %s %s\n", term.Tag(c, "engine"), term.Key(c, fmt.Sprintf("%q", task.ID)), term.Status(c, "KILLED"))
+			fmt.Fprintf(out, "%s Workflow %s %s %s\n",
+				term.Tag(c, "engine"),
+				term.Key(c, fmt.Sprintf("%q", wf.Name)),
+				term.Muted(c, fmt.Sprintf("(run_id=%s)", runID)),
+				term.Status(c, "KILLED"),
+			)
 			return fmt.Errorf("task %q: %w", task.ID, ErrRunKilled)
 		}
 
@@ -331,7 +380,12 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 			e.markTaskFinished(taskRunID, db.StatusFailed, exitCode, logs)
 			e.markRunFailed(runID)
 
-			fmt.Printf("[engine] Task %q FAILED (exit_code=%d). Aborting workflow.\n", task.ID, exitCode)
+			fmt.Fprintf(out, "%s Task %s %s %s. Aborting workflow.\n",
+				term.Tag(c, "engine"),
+				term.Key(c, fmt.Sprintf("%q", task.ID)),
+				term.Status(c, "FAILED"),
+				term.Muted(c, fmt.Sprintf("(exit_code=%d)", exitCode)),
+			)
 			if runErr != nil {
 				return fmt.Errorf("task %q failed: %w", task.ID, runErr)
 			}
@@ -339,7 +393,12 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 		}
 
 		e.markTaskFinished(taskRunID, db.StatusSuccess, exitCode, logs)
-		fmt.Printf("[engine] Task %q SUCCEEDED (exit_code=%d)\n", task.ID, exitCode)
+		fmt.Fprintf(out, "%s Task %s %s %s\n",
+			term.Tag(c, "engine"),
+			term.Key(c, fmt.Sprintf("%q", task.ID)),
+			term.Status(c, "SUCCEEDED"),
+			term.Muted(c, fmt.Sprintf("(exit_code=%d)", exitCode)),
+		)
 	}
 
 	if e.isKilled(runID) {
@@ -353,14 +412,26 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 		return fmt.Errorf("record workflow run completion: %w", err)
 	}
 
-	fmt.Printf("[engine] Workflow %q (run_id=%s) SUCCEEDED\n", wf.Name, runID)
+	fmt.Fprintf(out, "%s Workflow %s %s %s\n",
+		term.Tag(c, "engine"),
+		term.Key(c, fmt.Sprintf("%q", wf.Name)),
+		term.Muted(c, fmt.Sprintf("(run_id=%s)", runID)),
+		term.Status(c, "SUCCEEDED"),
+	)
 	return nil
 }
 
 func (e *Engine) finishCanceledRun(runID, workflowName string, ctxErr error) error {
 	if e.isKilled(runID) {
+		out := e.stdout()
+		c := term.ColorEnabledWriter(out)
 		e.markRunStatus(runID, db.StatusKilled)
-		fmt.Printf("[engine] Workflow %q (run_id=%s) KILLED\n", workflowName, runID)
+		fmt.Fprintf(out, "%s Workflow %s %s %s\n",
+			term.Tag(c, "engine"),
+			term.Key(c, fmt.Sprintf("%q", workflowName)),
+			term.Muted(c, fmt.Sprintf("(run_id=%s)", runID)),
+			term.Status(c, "KILLED"),
+		)
 		return ErrRunKilled
 	}
 	e.markRunFailed(runID)
@@ -432,7 +503,10 @@ func (e *Engine) executeSubflowTask(
 		go func() {
 			defer e.wg.Done()
 			if childErr := <-childDone; childErr != nil {
-				fmt.Fprintf(os.Stderr, "[subflow] Async child run %s (%s) failed: %v\n", childRunID, childWF.Name, childErr)
+				errOut := e.stderr()
+				ec := term.ColorEnabledWriter(errOut)
+				fmt.Fprintf(errOut, "%s Async child run %s (%s) %s: %v\n",
+					term.Tag(ec, "subflow"), childRunID, childWF.Name, term.Status(ec, "FAILED"), childErr)
 			}
 		}()
 		return &runner.Result{ExitCode: 0, Logs: logBuf.String()}, nil
@@ -509,7 +583,10 @@ func (e *Engine) markTaskFinished(taskRunID int64, status string, exitCode int64
 	defer cancel()
 
 	if err := e.store.FinishTaskRun(dbCtx, taskRunID, status, exitCode, logs); err != nil {
-		fmt.Fprintf(os.Stderr, "[engine] Warning: failed to persist task_run %d status: %v\n", taskRunID, err)
+		errOut := e.stderr()
+		ec := term.ColorEnabledWriter(errOut)
+		fmt.Fprintf(errOut, "%s %s: failed to persist task_run %d status: %v\n",
+			term.Tag(ec, "engine"), term.Status(ec, "Warning"), taskRunID, err)
 	}
 }
 
@@ -522,7 +599,10 @@ func (e *Engine) markRunStatus(runID, status string) {
 	defer cancel()
 
 	if err := e.store.FinishRun(dbCtx, runID, status); err != nil {
-		fmt.Fprintf(os.Stderr, "[engine] Warning: failed to persist run %s %s status: %v\n", runID, status, err)
+		errOut := e.stderr()
+		ec := term.ColorEnabledWriter(errOut)
+		fmt.Fprintf(errOut, "%s %s: failed to persist run %s %s status: %v\n",
+			term.Tag(ec, "engine"), term.Status(ec, "Warning"), runID, status, err)
 	}
 }
 

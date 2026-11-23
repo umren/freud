@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/mattn/go-isatty"
 
+	"freud/internal/term"
 	"freud/internal/workflow"
 )
 
@@ -119,6 +120,8 @@ type DockerRunner struct {
 	cli     *client.Client
 	noCache bool
 	imageMu sync.Mutex
+	out     io.Writer
+	errOut  io.Writer
 }
 
 // NewDockerRunner initializes a Docker SDK client using environment settings and API negotiation.
@@ -127,7 +130,41 @@ func NewDockerRunner() (*DockerRunner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create docker client: %w", err)
 	}
-	return &DockerRunner{cli: cli}, nil
+	return &DockerRunner{
+		cli:    cli,
+		out:    os.Stdout,
+		errOut: os.Stderr,
+	}, nil
+}
+
+// SetOutput overrides stdout and stderr writers used for terminal progress and container log echoing.
+func (r *DockerRunner) SetOutput(out, errOut io.Writer) {
+	r.out = out
+	r.errOut = errOut
+}
+
+func (r *DockerRunner) stdout() io.Writer {
+	if r.out != nil {
+		return r.out
+	}
+	return os.Stdout
+}
+
+func (r *DockerRunner) stderr() io.Writer {
+	if r.errOut != nil {
+		return r.errOut
+	}
+	return os.Stderr
+}
+
+func displayDockerStream(in io.Reader, out io.Writer) error {
+	var fd uintptr
+	var isTerm bool
+	if f, ok := out.(*os.File); ok {
+		fd = f.Fd()
+		isTerm = isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
+	}
+	return jsonmessage.DisplayJSONMessagesStream(in, out, fd, isTerm, nil)
 }
 
 // SetNoCache configures whether dependency image caching should be bypassed and rebuilt.
@@ -290,10 +327,11 @@ func (r *DockerRunner) ensureImage(ctx context.Context, imageName string, logOut
 		return image.InspectResponse{}, fmt.Errorf("inspect image %q: %w", imageName, err)
 	}
 
-	msg := fmt.Sprintf("[runner] Image %s not found locally, pulling...\n", imageName)
-	fmt.Print(msg)
+	out := r.stdout()
+	c := term.ColorEnabledWriter(out)
+	fmt.Fprintf(out, "%s Image %s not found locally, pulling...\n", term.Tag(c, "runner"), term.Key(c, imageName))
 	if logOut != nil {
-		_, _ = io.WriteString(logOut, msg)
+		_, _ = fmt.Fprintf(logOut, "[runner] Image %s not found locally, pulling...\n", imageName)
 	}
 	pullStream, err := r.cli.ImagePull(ctx, imageName, image.PullOptions{})
 	if err != nil {
@@ -301,9 +339,7 @@ func (r *DockerRunner) ensureImage(ctx context.Context, imageName string, logOut
 	}
 	defer pullStream.Close()
 
-	fd := os.Stdout.Fd()
-	isTerm := isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
-	if err := jsonmessage.DisplayJSONMessagesStream(pullStream, os.Stdout, fd, isTerm, nil); err != nil {
+	if err := displayDockerStream(pullStream, out); err != nil {
 		return image.InspectResponse{}, fmt.Errorf("stream pull progress for %q: %w", imageName, err)
 	}
 
@@ -345,8 +381,8 @@ func (r *DockerRunner) streamContainerLogs(ctx context.Context, containerID stri
 		return errCh
 	}
 
-	stdoutWriter := io.MultiWriter(os.Stdout, liveBuf)
-	stderrWriter := io.MultiWriter(os.Stderr, liveBuf)
+	stdoutWriter := io.MultiWriter(r.stdout(), liveBuf)
+	stderrWriter := io.MultiWriter(r.stderr(), liveBuf)
 
 	go func() {
 		defer reader.Close()
@@ -362,7 +398,10 @@ func (r *DockerRunner) removeContainer(containerID string) {
 	defer cancel()
 
 	if err := r.cli.ContainerRemove(rmCtx, containerID, container.RemoveOptions{Force: true}); err != nil {
-		fmt.Fprintf(os.Stderr, "[runner] Warning: failed to remove container %s: %v\n", containerID, err)
+		errOut := r.stderr()
+		ec := term.ColorEnabledWriter(errOut)
+		fmt.Fprintf(errOut, "%s %s: failed to remove container %s: %v\n",
+			term.Tag(ec, "runner"), term.Status(ec, "Warning"), containerID, err)
 	}
 }
 

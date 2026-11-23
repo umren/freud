@@ -38,6 +38,8 @@ A pure-Go task orchestrator that parses YAML workflow definitions, resolves task
     ├── db/                 # SQLite initialization, WAL pragmas, migrations, state queries
     ├── runner/             # Docker SDK execution, image pull/cache, log capture, cleanup
     ├── engine/             # Pipeline orchestration and workspace lifecycle
+    ├── term/               # Terminal ANSI color formatting and ASCII startup banner
+    ├── tui/                # Interactive Bubbletea terminal UI (dashboard, flows, logs, run/kill)
     └── ui/                 # Embedded web UI (templates, HTMX/Alpine static assets, HTTP server)
 ```
 
@@ -67,6 +69,14 @@ Optionally pass a custom `.env` file or force-rebuild cached dependency images:
 ```bash
 ./freud run --env-file .env.prod flows/etl-example.yaml
 ./freud run --no-cache flows/etl-example.yaml
+```
+
+Start the interactive terminal UI (Dashboard, Flows + YAML viewer, live Executions/Logs, Run & Kill):
+
+```bash
+./freud tui
+# Optional flags:
+./freud tui --flows-dir flows --scheduler
 ```
 
 Start the embedded Web UI (default port `4321`):

@@ -3,11 +3,13 @@ package ui
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
 
 	"freud/internal/cron"
+	"freud/internal/term"
 	"freud/internal/workflow"
 )
 
@@ -21,6 +23,8 @@ type FlowRunner interface {
 type Scheduler struct {
 	runner   FlowRunner
 	flowsDir string
+	out      io.Writer
+	errOut   io.Writer
 
 	mu          sync.Mutex
 	activeFlows map[string]bool
@@ -33,9 +37,31 @@ func NewScheduler(runner FlowRunner, flowsDir string) *Scheduler {
 	return &Scheduler{
 		runner:      runner,
 		flowsDir:    flowsDir,
+		out:         os.Stdout,
+		errOut:      os.Stderr,
 		activeFlows: make(map[string]bool),
 		lastFired:   make(map[string]string),
 	}
+}
+
+// SetOutput overrides stdout and stderr writers used by the scheduler.
+func (s *Scheduler) SetOutput(out, errOut io.Writer) {
+	s.out = out
+	s.errOut = errOut
+}
+
+func (s *Scheduler) stdout() io.Writer {
+	if s.out != nil {
+		return s.out
+	}
+	return os.Stdout
+}
+
+func (s *Scheduler) stderr() io.Writer {
+	if s.errOut != nil {
+		return s.errOut
+	}
+	return os.Stderr
 }
 
 // StartScheduler runs the cron scheduler loop until ctx is canceled and waits for active runs.
@@ -63,7 +89,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 	entries, err := workflow.LoadDir(s.flowsDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[scheduler] Failed to scan %q: %v\n", s.flowsDir, err)
+		errOut := s.stderr()
+		ec := term.ColorEnabledWriter(errOut)
+		fmt.Fprintf(errOut, "%s Failed to scan %q: %v\n", term.Tag(ec, "scheduler"), s.flowsDir, err)
 		return
 	}
 
@@ -89,7 +117,14 @@ func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 		}
 		if s.activeFlows[entry.FileName] {
 			s.mu.Unlock()
-			fmt.Printf("[scheduler] Skipping flow %q (%s): previous execution is still running\n", entry.Workflow.Name, entry.FileName)
+			out := s.stdout()
+			c := term.ColorEnabledWriter(out)
+			fmt.Fprintf(out, "%s Skipping flow %s (%s): previous execution is still %s\n",
+				term.Tag(c, "scheduler"),
+				term.Key(c, fmt.Sprintf("%q", entry.Workflow.Name)),
+				entry.FileName,
+				term.Status(c, "RUNNING"),
+			)
 			continue
 		}
 		s.lastFired[entry.FileName] = minuteKey
@@ -108,9 +143,18 @@ func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 				s.mu.Unlock()
 			}()
 
-			fmt.Printf("[scheduler] Triggering scheduled flow %q (cron=%q)\n", wf.Name, wf.Cron)
+			out := s.stdout()
+			c := term.ColorEnabledWriter(out)
+			fmt.Fprintf(out, "%s Triggering scheduled flow %s %s\n",
+				term.Tag(c, "scheduler"),
+				term.Key(c, fmt.Sprintf("%q", wf.Name)),
+				term.Muted(c, fmt.Sprintf("(cron=%q)", wf.Cron)),
+			)
 			if _, runErr := s.runner.Run(ctx, wf); runErr != nil {
-				fmt.Fprintf(os.Stderr, "[scheduler] Flow %q failed: %v\n", wf.Name, runErr)
+				errOut := s.stderr()
+				ec := term.ColorEnabledWriter(errOut)
+				fmt.Fprintf(errOut, "%s Flow %q %s: %v\n",
+					term.Tag(ec, "scheduler"), wf.Name, term.Status(ec, "FAILED"), runErr)
 			}
 		}()
 	}

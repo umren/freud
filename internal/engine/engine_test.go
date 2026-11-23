@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -463,5 +465,84 @@ func TestEngineKillActiveRun(t *testing.T) {
 
 	if err := eng.Kill(runID); !errors.Is(err, ErrRunNotActive) {
 		t.Fatalf("expected ErrRunNotActive after completion, got %v", err)
+	}
+}
+
+func TestEngineSubflowWaitFalseFailedChildAndDepthLimit(t *testing.T) {
+	tmpDir := t.TempDir()
+	flowsDir := filepath.Join(tmpDir, "flows")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatalf("mkdir flows: %v", err)
+	}
+
+	writeFlow := func(file, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(flowsDir, file), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", file, err)
+		}
+	}
+
+	// 1) Failing child subflow fails parent.
+	writeFlow("fail-child.yaml", "name: fail-child\ntasks:\n  - id: boom\n    runtime: python\n    script: raise SystemExit(2)\n")
+	writeFlow("fail-parent.yaml", "name: fail-parent\ntasks:\n  - id: call_fail\n    flow: fail-child\n")
+
+	// 2) Async wait: false subflow completes via eng.Wait().
+	writeFlow("async-child.yaml", "name: async-child\ntasks:\n  - id: bg\n    runtime: python\n    script: print('bg')\n")
+	writeFlow("async-parent.yaml", "name: async-parent\ntasks:\n  - id: fire\n    flow: async-child\n    wait: false\n")
+
+	// 3) Subflow depth limit (> maxSubflowDepth).
+	for i := 0; i <= maxSubflowDepth; i++ {
+		if i == maxSubflowDepth {
+			writeFlow(fmt.Sprintf("d%d.yaml", i), fmt.Sprintf("name: d%d\ntasks:\n  - id: leaf\n    runtime: python\n    script: print(1)\n", i))
+		} else {
+			writeFlow(fmt.Sprintf("d%d.yaml", i), fmt.Sprintf("name: d%d\ntasks:\n  - id: next\n    flow: d%d\n", i, i+1))
+		}
+	}
+
+	store, err := db.Open(filepath.Join(tmpDir, "orchestrator.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	mr := &mockRunner{failTask: "boom", exitCode: 2}
+	eng := New(store, mr, filepath.Join(tmpDir, "workspaces"))
+	eng.SetFlowsDir(flowsDir)
+	eng.SetOutput(io.Discard, io.Discard)
+
+	failParentWF, err := workflow.ParseFile(filepath.Join(flowsDir, "fail-parent.yaml"))
+	if err != nil {
+		t.Fatalf("parse fail-parent: %v", err)
+	}
+	failParentRunID, err := eng.Run(context.Background(), failParentWF)
+	if err == nil {
+		t.Fatalf("expected fail-parent to fail when child subflow fails")
+	}
+	rec, _ := store.GetRun(context.Background(), failParentRunID)
+	if rec.Status != db.StatusFailed {
+		t.Fatalf("expected FAILED status, got %s", rec.Status)
+	}
+
+	asyncParentWF, err := workflow.ParseFile(filepath.Join(flowsDir, "async-parent.yaml"))
+	if err != nil {
+		t.Fatalf("parse async-parent: %v", err)
+	}
+	asyncParentRunID, err := eng.Run(context.Background(), asyncParentWF)
+	if err != nil {
+		t.Fatalf("async-parent failed: %v", err)
+	}
+	eng.Wait()
+
+	children, err := store.ListChildRuns(context.Background(), asyncParentRunID)
+	if err != nil || len(children) != 1 || children[0].Status != db.StatusSuccess {
+		t.Fatalf("expected 1 SUCCEEDED async child run, got %+v, err=%v", children, err)
+	}
+
+	d0WF, err := workflow.ParseFile(filepath.Join(flowsDir, "d0.yaml"))
+	if err != nil {
+		t.Fatalf("parse d0: %v", err)
+	}
+	if _, err := eng.Run(context.Background(), d0WF); err == nil || !strings.Contains(err.Error(), "subflow depth limit") {
+		t.Fatalf("expected subflow depth limit error, got %v", err)
 	}
 }
