@@ -42,6 +42,7 @@ A pure-Go task orchestrator that parses YAML workflow definitions, resolves task
     ├── engine/             # Pipeline orchestration, subflows, kill control, workspace lifecycle
     ├── term/               # Terminal ANSI color formatting and ASCII startup banner
     ├── tui/                # Interactive Bubbletea terminal UI (dashboard, flows, logs, run/kill)
+    ├── service/            # Shared query helpers and JSON DTOs used by REST API and MCP
     ├── mcp/                # Model Context Protocol (MCP) server (stdio & Streamable HTTP)
     └── ui/                 # Embedded web UI, REST API v1, and HTTP /mcp endpoint
 ```

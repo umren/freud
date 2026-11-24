@@ -160,4 +160,66 @@ func TestMCPHTTPAndKillTool(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 on GET /mcp, got %d", rec.Code)
 	}
+
+	// DELETE returns 204; PUT returns 405.
+	req = httptest.NewRequest(http.MethodDelete, "/mcp", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 on DELETE /mcp, got %d", rec.Code)
+	}
+	req = httptest.NewRequest(http.MethodPut, "/mcp", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on PUT /mcp, got %d", rec.Code)
+	}
+
+	// Batch JSON-RPC request over HTTP handles multiple calls plus notification cleanly.
+	batchBody := `[
+		{"jsonrpc":"2.0","id":10,"method":"ping"},
+		{"jsonrpc":"2.0","method":"notifications/initialized"},
+		{"jsonrpc":"2.0","id":11,"method":"resources/list"},
+		{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"get_flow","arguments":{"file":"mcp-demo"}}},
+		{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"list_executions","arguments":{"status":"KILLED","limit":5}}},
+		{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"get_execution","arguments":{"run_id":"live-mcp-run"}}},
+		{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"run_flow","arguments":{"file":"mcp.yaml","wait":false}}}
+	]`
+	req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(batchBody))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	srv.Wait()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for batch HTTP /mcp, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var batchOut []jsonRPCResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &batchOut); err != nil || len(batchOut) != 6 {
+		t.Fatalf("expected 6 batch responses (notification omitted), got len=%d err=%v body=%s", len(batchOut), err, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "freud://flows/mcp.yaml") || !strings.Contains(rec.Body.String(), "live-mcp-run") {
+		t.Fatalf("unexpected batch response body: %s", rec.Body.String())
+	}
+
+	// Protocol and tool error handling cases.
+	errCases := []struct {
+		body    string
+		wantSub string
+	}{
+		{`{invalid json`, "-32700"},
+		{`[]`, "-32600"},
+		{`{"jsonrpc":"2.0","id":20,"method":"no_such_method"}`, "-32601"},
+		{`{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"no_such_tool"}}`, "-32601"},
+		{`{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"get_flow","arguments":{"file":"../secret.yaml"}}}`, `"isError":true`},
+		{`{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"list_executions","arguments":{"status":"BAD"}}}`, `"isError":true`},
+		{`{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"get_execution","arguments":{"run_id":"no-such-run"}}}`, `"isError":true`},
+		{`{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"kill_execution","arguments":{"run_id":"no-such-run"}}}`, `"isError":true`},
+	}
+	for _, tc := range errCases {
+		req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(tc.body))
+		rec = httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if !strings.Contains(rec.Body.String(), tc.wantSub) {
+			t.Fatalf("for %s expected substring %q, got: %s", tc.body, tc.wantSub, rec.Body.String())
+		}
+	}
 }

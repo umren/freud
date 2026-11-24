@@ -394,6 +394,13 @@ func runTUICmd(args []string) error {
 }
 
 func runMCPCmd(args []string) error {
+	// Reserve stdout strictly for MCP JSON-RPC frames; redirect any stray stdout output to stderr.
+	mcpOut := os.Stdout
+	os.Stdout = os.Stderr
+	return runMCPWithIO(args, os.Stdin, mcpOut)
+}
+
+func runMCPWithIO(args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var b cliFlagBindings
@@ -403,11 +410,6 @@ func runMCPCmd(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-
-	// Reserve stdout strictly for MCP JSON-RPC frames; redirect any stray stdout output to stderr.
-	mcpIn := os.Stdin
-	mcpOut := os.Stdout
-	os.Stdout = os.Stderr
 
 	cfg, err := config.Load(b.toOverrides(fs))
 	if err != nil {
@@ -448,7 +450,7 @@ func runMCPCmd(args []string) error {
 	})
 
 	serveCtx := mcp.WithActor(ctx, actorName, actorDetails)
-	err = mcpSrv.ServeStdio(serveCtx, mcpIn, mcpOut)
+	err = mcpSrv.ServeStdio(serveCtx, in, out)
 	stop()
 	mcpSrv.Wait()
 	rt.eng.Wait()

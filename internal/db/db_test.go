@@ -287,8 +287,9 @@ func TestPostgresStoreIntegration(t *testing.T) {
 		t.Fatalf("expected DialectPostgres, got %s", store.Dialect())
 	}
 
-	_, _ = store.db.ExecContext(context.Background(), "TRUNCATE TABLE task_runs, runs RESTART IDENTITY CASCADE")
+	_, _ = store.db.ExecContext(context.Background(), "TRUNCATE TABLE task_runs, runs, users, sessions, api_tokens, audit_logs RESTART IDENTITY CASCADE")
 	runRemoteStoreCRUDTest(t, store)
+	runStoreUsersAndAuditChecks(t, store)
 }
 
 func TestMySQLStoreIntegration(t *testing.T) {
@@ -310,7 +311,12 @@ func TestMySQLStoreIntegration(t *testing.T) {
 	ctx := context.Background()
 	_, _ = store.db.ExecContext(ctx, "DELETE FROM task_runs")
 	_, _ = store.db.ExecContext(ctx, "DELETE FROM runs")
+	_, _ = store.db.ExecContext(ctx, "DELETE FROM api_tokens")
+	_, _ = store.db.ExecContext(ctx, "DELETE FROM sessions")
+	_, _ = store.db.ExecContext(ctx, "DELETE FROM audit_logs")
+	_, _ = store.db.ExecContext(ctx, "DELETE FROM users")
 	runRemoteStoreCRUDTest(t, store)
+	runStoreUsersAndAuditChecks(t, store)
 
 	// Re-open on same database to verify idempotent MySQL/MariaDB migration check.
 	store2, err := Open(dsn)

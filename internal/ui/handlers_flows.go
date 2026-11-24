@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"freud/internal/cron"
 	"freud/internal/engine"
+	"freud/internal/service"
 	"freud/internal/workflow"
 )
 
@@ -119,25 +121,18 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) findFlowEntryResult(fileName string) (*workflow.WorkflowEntry, int, error) {
-	if fileName == "" || strings.ContainsAny(fileName, "/\\") || fileName == "." || fileName == ".." {
-		return nil, http.StatusNotFound, fmt.Errorf("workflow not found")
-	}
-
-	entries, err := workflow.LoadDir(s.cfg.FlowsDir)
+	matched, err := service.FindFlow(s.cfg.FlowsDir, fileName, false)
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
-	}
-
-	for i := range entries {
-		if entries[i].FileName == fileName {
-			if entries[i].ParseErr != nil {
-				return nil, http.StatusBadRequest, fmt.Errorf("invalid workflow %q: %w", fileName, entries[i].ParseErr)
-			}
-			return &entries[i], http.StatusOK, nil
+		switch {
+		case errors.Is(err, service.ErrFlowNotFound):
+			return nil, http.StatusNotFound, err
+		case errors.Is(err, service.ErrInvalidFlow):
+			return nil, http.StatusBadRequest, err
+		default:
+			return nil, http.StatusInternalServerError, err
 		}
 	}
-
-	return nil, http.StatusNotFound, fmt.Errorf("workflow %q not found", fileName)
+	return matched, http.StatusOK, nil
 }
 
 func (s *Server) findFlowEntry(w http.ResponseWriter, fileName string) (*workflow.WorkflowEntry, bool) {
