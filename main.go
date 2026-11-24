@@ -70,7 +70,7 @@ type cliFlagBindings struct {
 
 func registerCommonFlags(fs *flag.FlagSet, b *cliFlagBindings) {
 	fs.StringVar(&b.configPath, "config", "", "Optional path to freud.toml configuration file")
-	fs.StringVar(&b.dbPath, "db", config.DefaultDBPath, "SQLite file path or PostgreSQL DSN (postgres://...)")
+	fs.StringVar(&b.dbPath, "db", config.DefaultDBPath, "SQLite path, PostgreSQL DSN (postgres://...), or MySQL/MariaDB DSN (mysql://..., mariadb://...)")
 	fs.StringVar(&b.workspacesDir, "workspaces-dir", config.DefaultWorkspacesDir, "Directory for task execution workspaces")
 	fs.StringVar(&b.flowsDir, "flows-dir", config.DefaultFlowsDir, "Directory containing workflow YAML files")
 	fs.StringVar(&b.includesDir, "includes-dir", config.DefaultIncludesDir, "Directory containing shared include files")

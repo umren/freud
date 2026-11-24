@@ -173,7 +173,7 @@ func applyTOMLFile(cfg *Config, path string) error {
 		if p == "" {
 			return ""
 		}
-		if skipSpecial && (p == ":memory:" || strings.HasPrefix(p, "file:") || db.DetectDialect(p) == db.DialectPostgres) {
+		if skipSpecial && (p == ":memory:" || strings.HasPrefix(p, "file:") || db.DetectDialect(p) != db.DialectSQLite) {
 			return p
 		}
 		if filepath.IsAbs(p) {

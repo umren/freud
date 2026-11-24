@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/docker/docker v28.5.2+incompatible
+	github.com/go-sql-driver/mysql v1.10.2
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/mattn/go-isatty v0.0.24
 	gopkg.in/yaml.v3 v3.0.1
@@ -15,6 +16,7 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect

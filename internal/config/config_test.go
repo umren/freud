@@ -109,16 +109,21 @@ func TestLoadValidationErrors(t *testing.T) {
 		t.Fatalf("expected invalid port error, got %v", err)
 	}
 
-	dsnTOML := filepath.Join(tmp, "pg.toml")
-	dsn := "postgres://freud:secret@localhost:5432/freud?sslmode=disable"
-	if err := os.WriteFile(dsnTOML, []byte("db = \""+dsn+"\"\n"), 0o644); err != nil {
-		t.Fatalf("write pg.toml: %v", err)
-	}
-	cfg, err := Load(Overrides{ConfigPath: dsnTOML})
-	if err != nil {
-		t.Fatalf("Load pg.toml: %v", err)
-	}
-	if cfg.DB != dsn {
-		t.Fatalf("expected postgres DSN preserved verbatim, got %q", cfg.DB)
+	for _, dsn := range []string{
+		"postgres://freud:secret@localhost:5432/freud?sslmode=disable",
+		"mysql://freud:secret@localhost:3306/freud",
+		"mariadb://freud:secret@localhost:3306/freud",
+	} {
+		dsnTOML := filepath.Join(tmp, "dsn.toml")
+		if err := os.WriteFile(dsnTOML, []byte("db = \""+dsn+"\"\n"), 0o644); err != nil {
+			t.Fatalf("write dsn.toml: %v", err)
+		}
+		cfg, err := Load(Overrides{ConfigPath: dsnTOML})
+		if err != nil {
+			t.Fatalf("Load %s: %v", dsn, err)
+		}
+		if cfg.DB != dsn {
+			t.Fatalf("expected DSN %q preserved verbatim, got %q", dsn, cfg.DB)
+		}
 	}
 }

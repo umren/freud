@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
@@ -18,6 +21,7 @@ type Dialect string
 const (
 	DialectSQLite   Dialect = "sqlite"
 	DialectPostgres Dialect = "postgres"
+	DialectMySQL    Dialect = "mysql"
 )
 
 const (
@@ -29,9 +33,14 @@ const (
 
 // DetectDialect determines the database backend from a file path or DSN.
 func DetectDialect(dsn string) Dialect {
-	lower := strings.ToLower(strings.TrimSpace(dsn))
+	trimmed := strings.TrimSpace(dsn)
+	lower := strings.ToLower(trimmed)
 	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
 		return DialectPostgres
+	}
+	if strings.HasPrefix(lower, "mysql://") || strings.HasPrefix(lower, "mariadb://") ||
+		strings.Contains(lower, "@tcp(") || strings.Contains(lower, "@unix(") {
+		return DialectMySQL
 	}
 	return DialectSQLite
 }
@@ -73,31 +82,41 @@ type RunStats struct {
 	Killed  int
 }
 
-// Store wraps database persistence for workflow runs and task runs across SQLite and PostgreSQL.
+// Store wraps database persistence for workflow runs and task runs across SQLite, PostgreSQL, and MySQL/MariaDB.
 type Store struct {
 	db      *sql.DB
 	dialect Dialect
 }
 
-// Open initializes the SQLite or PostgreSQL database, runs migrations, and returns a Store.
+// Open initializes the SQLite, PostgreSQL, or MySQL/MariaDB database, runs migrations, and returns a Store.
 func Open(dsn string) (*Store, error) {
 	dialect := DetectDialect(dsn)
 	driverName := "sqlite"
-	if dialect == DialectPostgres {
+	connStr := dsn
+
+	switch dialect {
+	case DialectPostgres:
 		driverName = "pgx"
+	case DialectMySQL:
+		driverName = "mysql"
+		normalized, err := normalizeMySQLDSN(dsn)
+		if err != nil {
+			return nil, fmt.Errorf("parse mysql DSN: %w", err)
+		}
+		connStr = normalized
 	}
 
-	sqlDB, err := sql.Open(driverName, dsn)
+	sqlDB, err := sql.Open(driverName, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open %s database: %w", dialect, err)
 	}
 
-	if dialect == DialectPostgres {
-		sqlDB.SetMaxOpenConns(10)
-		sqlDB.SetMaxIdleConns(5)
-	} else {
+	if dialect == DialectSQLite {
 		// Keep a single open connection so SQLite WAL and busy_timeout apply consistently.
 		sqlDB.SetMaxOpenConns(1)
+	} else {
+		sqlDB.SetMaxOpenConns(10)
+		sqlDB.SetMaxIdleConns(5)
 	}
 
 	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -128,6 +147,58 @@ func Open(dsn string) (*Store, error) {
 	}
 
 	return store, nil
+}
+
+func normalizeMySQLDSN(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	lower := strings.ToLower(trimmed)
+
+	var driverDSN string
+	if strings.HasPrefix(lower, "mysql://") || strings.HasPrefix(lower, "mariadb://") {
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			return "", err
+		}
+		host := u.Hostname()
+		if host == "" {
+			host = "localhost"
+		}
+		port := u.Port()
+		if port == "" {
+			port = "3306"
+		}
+		cfg := mysql.NewConfig()
+		cfg.Net = "tcp"
+		cfg.Addr = net.JoinHostPort(host, port)
+		if u.User != nil {
+			cfg.User = u.User.Username()
+			cfg.Passwd, _ = u.User.Password()
+		}
+		cfg.DBName = strings.TrimPrefix(u.Path, "/")
+		driverDSN = cfg.FormatDSN()
+		if u.RawQuery != "" {
+			sep := "?"
+			if strings.Contains(driverDSN, "?") {
+				sep = "&"
+			}
+			driverDSN += sep + u.RawQuery
+		}
+	} else {
+		driverDSN = trimmed
+	}
+
+	parsed, err := mysql.ParseDSN(driverDSN)
+	if err != nil {
+		return "", err
+	}
+	parsed.ClientFoundRows = true
+	if parsed.Params == nil {
+		parsed.Params = make(map[string]string)
+	}
+	if _, ok := parsed.Params["charset"]; !ok {
+		parsed.Params["charset"] = "utf8mb4"
+	}
+	return parsed.FormatDSN(), nil
 }
 
 // Dialect returns the active SQL backend dialect.
@@ -174,6 +245,10 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate() error {
+	if s.dialect == DialectMySQL {
+		return s.migrateMySQL()
+	}
+
 	idCol := "INTEGER PRIMARY KEY AUTOINCREMENT"
 	exitCodeCol := "INTEGER"
 	if s.dialect == DialectPostgres {
@@ -181,8 +256,8 @@ func (s *Store) migrate() error {
 		exitCodeCol = "BIGINT"
 	}
 
-	schema := fmt.Sprintf(`
-CREATE TABLE IF NOT EXISTS runs (
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS runs (
 	id TEXT PRIMARY KEY,
 	workflow_name TEXT NOT NULL,
 	status TEXT NOT NULL,
@@ -191,9 +266,8 @@ CREATE TABLE IF NOT EXISTS runs (
 	definition_json TEXT,
 	parent_run_id TEXT,
 	parent_task_id TEXT
-);
-
-CREATE TABLE IF NOT EXISTS task_runs (
+)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS task_runs (
 	id %s,
 	run_id TEXT NOT NULL,
 	task_id TEXT NOT NULL,
@@ -205,14 +279,15 @@ CREATE TABLE IF NOT EXISTS task_runs (
 	runtime TEXT,
 	image TEXT,
 	FOREIGN KEY (run_id) REFERENCES runs(id)
-);
+)`, idCol, exitCodeCol),
+		`CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC)`,
+	}
 
-CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id);
-CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
-`, idCol, exitCodeCol)
-
-	if _, err := s.db.Exec(schema); err != nil {
-		return fmt.Errorf("apply schema: %w", err)
+	for _, stmt := range statements {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("apply schema: %w", err)
+		}
 	}
 
 	alterations := []struct {
@@ -239,6 +314,70 @@ CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
 		}
 	}
 
+	return nil
+}
+
+func (s *Store) migrateMySQL() error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS runs (
+	id VARCHAR(128) PRIMARY KEY,
+	workflow_name VARCHAR(255) NOT NULL,
+	status VARCHAR(32) NOT NULL,
+	created_at VARCHAR(64) NOT NULL,
+	finished_at VARCHAR(64),
+	definition_json LONGTEXT,
+	parent_run_id VARCHAR(128),
+	parent_task_id VARCHAR(255),
+	INDEX idx_runs_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS task_runs (
+	id BIGINT AUTO_INCREMENT PRIMARY KEY,
+	run_id VARCHAR(128) NOT NULL,
+	task_id VARCHAR(255) NOT NULL,
+	status VARCHAR(32) NOT NULL,
+	exit_code BIGINT,
+	logs LONGTEXT,
+	started_at VARCHAR(64) NOT NULL,
+	finished_at VARCHAR(64),
+	runtime VARCHAR(64),
+	image VARCHAR(255),
+	INDEX idx_task_runs_run_id (run_id),
+	CONSTRAINT fk_task_runs_run_id FOREIGN KEY (run_id) REFERENCES runs(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+	}
+
+	for _, stmt := range statements {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("apply mysql schema: %w", err)
+		}
+	}
+
+	alterations := []struct {
+		table  string
+		column string
+		def    string
+	}{
+		{"runs", "definition_json", "LONGTEXT"},
+		{"runs", "parent_run_id", "VARCHAR(128)"},
+		{"runs", "parent_task_id", "VARCHAR(255)"},
+		{"task_runs", "runtime", "VARCHAR(64)"},
+		{"task_runs", "image", "VARCHAR(255)"},
+	}
+	for _, alt := range alterations {
+		var cnt int
+		err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+			alt.table, alt.column,
+		).Scan(&cnt)
+		if err != nil {
+			return fmt.Errorf("inspect mysql column %s.%s: %w", alt.table, alt.column, err)
+		}
+		if cnt == 0 {
+			if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", alt.table, alt.column, alt.def)); err != nil {
+				return fmt.Errorf("add mysql column %s.%s: %w", alt.table, alt.column, err)
+			}
+		}
+	}
 	return nil
 }
 

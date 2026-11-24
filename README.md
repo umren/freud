@@ -110,7 +110,7 @@ When you want custom locations, Freud loads settings with the following preceden
 3. **Optional `freud.toml`** in the current directory (or via `--config <path>`):
 
 ```toml
-db = "./data/freud.db"              # or PostgreSQL DSN: "postgres://user:pass@localhost:5432/freud?sslmode=disable"
+db = "./data/freud.db"              # SQLite path, postgres://..., mysql://..., or mariadb://...
 workspaces_dir = "./data/workspaces"
 flows_dir = "./pipelines"
 includes_dir = "./shared_libs"
