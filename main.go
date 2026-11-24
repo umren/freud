@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"freud/internal/config"
 	"freud/internal/db"
 	"freud/internal/engine"
 	"freud/internal/env"
@@ -23,14 +25,6 @@ import (
 	"freud/internal/tui"
 	"freud/internal/ui"
 	"freud/internal/workflow"
-)
-
-const (
-	dbPath             = "orchestrator.db"
-	workspacesDir      = "workspaces"
-	defaultFlowsDir    = "flows"
-	defaultIncludesDir = "includes"
-	defaultUIPort      = 4321
 )
 
 func main() {
@@ -62,11 +56,148 @@ func runCLI(args []string) error {
 	}
 }
 
+type cliFlagBindings struct {
+	configPath    string
+	dbPath        string
+	workspacesDir string
+	flowsDir      string
+	includesDir   string
+	envFile       string
+	noCache       bool
+	port          int
+	scheduler     bool
+}
+
+func registerCommonFlags(fs *flag.FlagSet, b *cliFlagBindings) {
+	fs.StringVar(&b.configPath, "config", "", "Optional path to freud.toml configuration file")
+	fs.StringVar(&b.dbPath, "db", config.DefaultDBPath, "Path to SQLite database file")
+	fs.StringVar(&b.workspacesDir, "workspaces-dir", config.DefaultWorkspacesDir, "Directory for task execution workspaces")
+	fs.StringVar(&b.flowsDir, "flows-dir", config.DefaultFlowsDir, "Directory containing workflow YAML files")
+	fs.StringVar(&b.includesDir, "includes-dir", config.DefaultIncludesDir, "Directory containing shared include files")
+	fs.StringVar(&b.envFile, "env-file", "", "Optional path to a .env file")
+	fs.BoolVar(&b.noCache, "no-cache", false, "Bypass and rebuild cached dependency images")
+}
+
+func registerDreamFlags(fs *flag.FlagSet, b *cliFlagBindings) {
+	registerCommonFlags(fs, b)
+	fs.IntVar(&b.port, "port", config.DefaultDreamPort, "HTTP port to serve the Freud web UI")
+	fs.BoolVar(&b.scheduler, "scheduler", false, "Enable background cron execution for scheduled flows")
+}
+
+func registerTUIFlags(fs *flag.FlagSet, b *cliFlagBindings) {
+	registerCommonFlags(fs, b)
+	fs.BoolVar(&b.scheduler, "scheduler", false, "Enable background cron execution for scheduled flows")
+}
+
+func (b *cliFlagBindings) toOverrides(fs *flag.FlagSet) config.Overrides {
+	ov := config.Overrides{
+		ConfigPath: b.configPath,
+	}
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "db":
+			ov.DB = &b.dbPath
+		case "workspaces-dir":
+			ov.WorkspacesDir = &b.workspacesDir
+		case "flows-dir":
+			ov.FlowsDir = &b.flowsDir
+		case "includes-dir":
+			ov.IncludesDir = &b.includesDir
+		case "env-file":
+			ov.EnvFile = &b.envFile
+		case "no-cache":
+			ov.NoCache = &b.noCache
+		case "port":
+			ov.DreamPort = &b.port
+		case "scheduler":
+			ov.Scheduler = &b.scheduler
+		}
+	})
+	return ov
+}
+
+type runtimeStack struct {
+	store        *db.Store
+	dockerRunner *runner.DockerRunner
+	eng          *engine.Engine
+	baseEnv      map[string]string
+	loadedEnv    []string
+}
+
+func openRuntime(cfg config.Config, workflowPath string, silent bool) (*runtimeStack, error) {
+	if cfg.DB != ":memory:" && !strings.HasPrefix(cfg.DB, "file:") {
+		if dir := filepath.Dir(cfg.DB); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return nil, fmt.Errorf("create database directory %q: %w", dir, err)
+			}
+		}
+	}
+
+	store, err := db.Open(cfg.DB)
+	if err != nil {
+		return nil, err
+	}
+
+	baseEnv, loadedFiles, err := loadEnvironment(cfg.EnvFile, workflowPath)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+
+	dockerRunner, err := runner.NewDockerRunner()
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	dockerRunner.SetNoCache(cfg.NoCache)
+	dockerRunner.SetIncludesDir(cfg.IncludesDir)
+
+	eng := engine.New(store, dockerRunner, cfg.WorkspacesDir)
+	eng.SetEnv(baseEnv)
+	eng.SetFlowsDir(cfg.FlowsDir)
+
+	if silent {
+		dockerRunner.SetOutput(io.Discard, io.Discard)
+		eng.SetOutput(io.Discard, io.Discard)
+	}
+
+	return &runtimeStack{
+		store:        store,
+		dockerRunner: dockerRunner,
+		eng:          eng,
+		baseEnv:      baseEnv,
+		loadedEnv:    loadedFiles,
+	}, nil
+}
+
+func (r *runtimeStack) close() {
+	if r.dockerRunner != nil {
+		_ = r.dockerRunner.Close()
+	}
+	if r.store != nil {
+		_ = r.store.Close()
+	}
+}
+
+func printConfigSummary(tag string, cfg config.Config, loadedEnv []string, envCount int) {
+	c := term.StdoutColor()
+	if cfg.ConfigFile != "" {
+		fmt.Printf("%s Loaded config from %s\n", term.Tag(c, tag), term.Key(c, cfg.ConfigFile))
+	}
+	if len(loadedEnv) > 0 {
+		fmt.Printf("%s Loaded %s env variable(s) from %s\n",
+			term.Tag(c, tag),
+			term.Bold(c, fmt.Sprintf("%d", envCount)),
+			term.Key(c, strings.Join(loadedEnv, ", ")),
+		)
+	}
+}
+
 func runWorkflowCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	envFile := fs.String("env-file", "", "Optional path to a .env file")
-	noCache := fs.Bool("no-cache", false, "Bypass and rebuild cached dependency images")
+	var b cliFlagBindings
+	registerCommonFlags(fs, &b)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -78,6 +209,11 @@ func runWorkflowCmd(args []string) error {
 	}
 	workflowPath := remaining[0]
 
+	cfg, err := config.Load(b.toOverrides(fs))
+	if err != nil {
+		return err
+	}
+
 	wf, err := workflow.ParseFile(workflowPath)
 	if err != nil {
 		return err
@@ -86,115 +222,78 @@ func runWorkflowCmd(args []string) error {
 	c := term.StdoutColor()
 	fmt.Print(term.Banner(c))
 
-	baseEnv, loadedFiles, err := loadEnvironment(*envFile, workflowPath)
+	rt, err := openRuntime(cfg, workflowPath, false)
 	if err != nil {
 		return err
 	}
-	if len(loadedFiles) > 0 {
-		fmt.Printf("%s Loaded %s env variable(s) from %s\n",
-			term.Tag(c, "freud"),
-			term.Bold(c, fmt.Sprintf("%d", len(baseEnv))),
-			term.Key(c, strings.Join(loadedFiles, ", ")),
-		)
-	}
+	defer rt.close()
 
-	store, err := db.Open(dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
+	printConfigSummary("freud", cfg, rt.loadedEnv, len(rt.baseEnv))
 
-	dockerRunner, err := runner.NewDockerRunner()
-	if err != nil {
-		return err
+	if cfg.FlowsDirExplicit {
+		rt.eng.SetFlowsDir(cfg.FlowsDir)
+	} else if wf.BaseDir != "" {
+		rt.eng.SetFlowsDir(wf.BaseDir)
 	}
-	defer dockerRunner.Close()
-	dockerRunner.SetNoCache(*noCache)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	eng := engine.New(store, dockerRunner, workspacesDir)
-	eng.SetEnv(baseEnv)
-	eng.SetFlowsDir(wf.BaseDir)
-
-	runID, err := eng.Run(ctx, wf)
-	eng.Wait()
+	runID, err := rt.eng.Run(ctx, wf)
+	rt.eng.Wait()
 	if err != nil {
 		if runID != "" {
 			return fmt.Errorf("workflow run %s failed: %w", runID, err)
 		}
 		return err
 	}
-
 	return nil
 }
 
 func runDreamCmd(args []string) error {
 	fs := flag.NewFlagSet("dream", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	port := fs.Int("port", defaultUIPort, "HTTP port to serve the Freud web UI")
-	flowsDir := fs.String("flows-dir", defaultFlowsDir, "Directory containing workflow YAML files")
-	includesDir := fs.String("includes-dir", defaultIncludesDir, "Directory containing shared include files")
-	envFile := fs.String("env-file", "", "Optional path to a .env file for UI-triggered and scheduled runs")
-	schedulerOn := fs.Bool("scheduler", false, "Enable background cron execution for scheduled flows")
+	var b cliFlagBindings
+	registerDreamFlags(fs, &b)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *port <= 0 || *port > 65535 {
-		return fmt.Errorf("invalid port %d", *port)
-	}
 
-	store, err := db.Open(dbPath)
+	cfg, err := config.Load(b.toOverrides(fs))
 	if err != nil {
 		return err
 	}
-	defer store.Close()
 
 	c := term.StdoutColor()
 	fmt.Print(term.Banner(c))
 
-	baseEnv, loadedFiles, err := loadEnvironment(*envFile, "")
+	rt, err := openRuntime(cfg, "", false)
 	if err != nil {
 		return err
 	}
-	if len(loadedFiles) > 0 {
-		fmt.Printf("%s Loaded %s env variable(s) from %s\n",
-			term.Tag(c, "dream"),
-			term.Bold(c, fmt.Sprintf("%d", len(baseEnv))),
-			term.Key(c, strings.Join(loadedFiles, ", ")),
-		)
-	}
+	defer rt.close()
 
-	dockerRunner, err := runner.NewDockerRunner()
-	if err != nil {
-		return err
-	}
-	defer dockerRunner.Close()
-
-	eng := engine.New(store, dockerRunner, workspacesDir)
-	eng.SetEnv(baseEnv)
-	eng.SetFlowsDir(*flowsDir)
+	printConfigSummary("dream", cfg, rt.loadedEnv, len(rt.baseEnv))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	addr := fmt.Sprintf(":%d", *port)
-	uiServer, err := ui.NewServer(store, ui.Config{
+	addr := fmt.Sprintf(":%d", cfg.Dream.Port)
+	uiServer, err := ui.NewServer(rt.store, ui.Config{
 		Addr:        addr,
-		FlowsDir:    *flowsDir,
-		IncludesDir: *includesDir,
-		SchedulerOn: *schedulerOn,
-		Runner:      eng,
+		FlowsDir:    cfg.FlowsDir,
+		IncludesDir: cfg.IncludesDir,
+		SchedulerOn: cfg.Dream.Scheduler,
+		Runner:      rt.eng,
 		RunCtx:      ctx,
 	})
 	if err != nil {
 		return err
 	}
 
-	if *schedulerOn {
-		go ui.StartScheduler(ctx, eng, *flowsDir)
-		fmt.Printf("%s Cron scheduler enabled (watching %s)\n", term.Tag(c, "scheduler"), term.Key(c, *flowsDir+"/"))
+	if cfg.Dream.Scheduler {
+		go ui.StartScheduler(ctx, rt.eng, cfg.FlowsDir)
+		fmt.Printf("%s Cron scheduler enabled (watching %s)\n", term.Tag(c, "scheduler"), term.Key(c, cfg.FlowsDir+"/"))
 	}
 
 	httpServer := &http.Server{
@@ -220,9 +319,50 @@ func runDreamCmd(args []string) error {
 		defer cancel()
 		err := httpServer.Shutdown(shutdownCtx)
 		uiServer.Wait()
-		eng.Wait()
+		rt.eng.Wait()
 		return err
 	}
+}
+
+func runTUICmd(args []string) error {
+	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var b cliFlagBindings
+	registerTUIFlags(fs, &b)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(b.toOverrides(fs))
+	if err != nil {
+		return err
+	}
+
+	rt, err := openRuntime(cfg, "", true)
+	if err != nil {
+		return err
+	}
+	defer rt.close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if cfg.TUI.Scheduler {
+		sched := ui.NewScheduler(rt.eng, cfg.FlowsDir)
+		sched.SetOutput(io.Discard, io.Discard)
+		go sched.Run(ctx)
+	}
+
+	err = tui.Run(tui.Config{
+		Store:       rt.store,
+		FlowsDir:    cfg.FlowsDir,
+		Runner:      rt.eng,
+		Ctx:         ctx,
+		SchedulerOn: cfg.TUI.Scheduler,
+	})
+	stop()
+	rt.eng.Wait()
+	return err
 }
 
 func runCacheCmd(args []string) error {
@@ -305,69 +445,13 @@ func loadEnvironment(explicitPath, workflowPath string) (map[string]string, []st
 	return env.LoadDefault(workflowPath)
 }
 
-func runTUICmd(args []string) error {
-	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	flowsDir := fs.String("flows-dir", defaultFlowsDir, "Directory containing workflow YAML files")
-	envFile := fs.String("env-file", "", "Optional path to a .env file for TUI-triggered and scheduled runs")
-	schedulerOn := fs.Bool("scheduler", false, "Enable background cron execution for scheduled flows")
-	noCache := fs.Bool("no-cache", false, "Bypass and rebuild cached dependency images")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	store, err := db.Open(dbPath)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-
-	baseEnv, _, err := loadEnvironment(*envFile, "")
-	if err != nil {
-		return err
-	}
-
-	dockerRunner, err := runner.NewDockerRunner()
-	if err != nil {
-		return err
-	}
-	defer dockerRunner.Close()
-	dockerRunner.SetNoCache(*noCache)
-	dockerRunner.SetOutput(io.Discard, io.Discard)
-
-	eng := engine.New(store, dockerRunner, workspacesDir)
-	eng.SetEnv(baseEnv)
-	eng.SetFlowsDir(*flowsDir)
-	eng.SetOutput(io.Discard, io.Discard)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if *schedulerOn {
-		sched := ui.NewScheduler(eng, *flowsDir)
-		sched.SetOutput(io.Discard, io.Discard)
-		go sched.Run(ctx)
-	}
-
-	err = tui.Run(tui.Config{
-		Store:       store,
-		FlowsDir:    *flowsDir,
-		Runner:      eng,
-		Ctx:         ctx,
-		SchedulerOn: *schedulerOn,
-	})
-	stop()
-	eng.Wait()
-	return err
-}
-
 func printUsage() {
 	c := term.StderrColor()
 	fmt.Fprint(os.Stderr, term.Banner(c))
 	fmt.Fprintln(os.Stderr, term.Bold(c, "Usage:"))
-	fmt.Fprintf(os.Stderr, "  %s [--env-file <path/to/.env>] [--no-cache] <path/to/workflow.yaml>\n", term.Key(c, "freud run"))
-	fmt.Fprintf(os.Stderr, "  %s [--flows-dir flows] [--env-file <path/to/.env>] [--scheduler] [--no-cache]\n", term.Key(c, "freud tui"))
-	fmt.Fprintf(os.Stderr, "  %s [--port 4321] [--flows-dir flows] [--includes-dir includes] [--scheduler]\n", term.Key(c, "freud dream"))
+	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--no-cache] <workflow.yaml>\n", term.Key(c, "freud run"))
+	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--scheduler] [--no-cache]\n", term.Key(c, "freud tui"))
+	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--port 4321] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--scheduler] [--no-cache]\n", term.Key(c, "freud dream"))
 	fmt.Fprintf(os.Stderr, "  %s\n", term.Key(c, "freud cache ls"))
 	fmt.Fprintf(os.Stderr, "  %s\n", term.Key(c, "freud cache clear"))
 }

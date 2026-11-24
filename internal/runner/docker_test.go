@@ -236,6 +236,31 @@ func TestResolveIncludeMounts(t *testing.T) {
 			t.Fatalf("expected does not exist error, got %v", err)
 		}
 	})
+
+	t.Run("configured custom includesDir resolves default and explicit includes", func(t *testing.T) {
+		customInc := filepath.Join(baseDir, "custom_shared")
+		if err := os.MkdirAll(customInc, 0o755); err != nil {
+			t.Fatalf("mkdir custom_shared: %v", err)
+		}
+		customFile := filepath.Join(customInc, "shared.py")
+		if err := os.WriteFile(customFile, []byte("ok = True\n"), 0o644); err != nil {
+			t.Fatalf("write shared.py: %v", err)
+		}
+
+		autoMounts, err := resolveIncludeMountsWithDir(workflow.Task{ID: "t5", BaseDir: baseDir}, customInc)
+		if err != nil || len(autoMounts) != 1 || autoMounts[0].Source != customInc || autoMounts[0].Target != "/includes" {
+			t.Fatalf("expected auto-mount of custom_shared, got %+v, err=%v", autoMounts, err)
+		}
+
+		explicitMounts, err := resolveIncludeMountsWithDir(workflow.Task{
+			ID:      "t6",
+			BaseDir: baseDir,
+			Include: []string{"includes/shared.py"},
+		}, customInc)
+		if err != nil || len(explicitMounts) != 1 || explicitMounts[0].Source != customFile || explicitMounts[0].Target != "/includes/shared.py" {
+			t.Fatalf("expected explicit mount from custom_shared, got %+v, err=%v", explicitMounts, err)
+		}
+	})
 }
 
 func TestBuildTaskEnvPythonPath(t *testing.T) {

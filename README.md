@@ -100,6 +100,33 @@ Manage cached dependency images:
 ./freud cache clear
 ```
 
+### Configuration (`freud.toml` & Environment Variables)
+
+Everything works out of the box with zero configuration (`orchestrator.db`, `workspaces/`, `flows/`, `includes/` in the current directory).
+When you want custom locations, Freud loads settings with the following precedence (highest wins):
+
+1. **CLI flags**: `--config`, `--db`, `--flows-dir`, `--includes-dir`, `--workspaces-dir`, `--env-file`, `--no-cache`, `--port`, `--scheduler`
+2. **Environment variables**: `FREUD_CONFIG`, `FREUD_DB`, `FREUD_FLOWS_DIR`, `FREUD_INCLUDES_DIR`, `FREUD_WORKSPACES_DIR`, `FREUD_ENV_FILE`, `FREUD_NO_CACHE`, `FREUD_PORT`, `FREUD_SCHEDULER`
+3. **Optional `freud.toml`** in the current directory (or via `--config <path>`):
+
+```toml
+db = "./data/freud.db"
+workspaces_dir = "./data/workspaces"
+flows_dir = "./pipelines"
+includes_dir = "./shared_libs"
+env_file = ".env.prod"
+no_cache = false
+
+[dream]
+port = 4321
+scheduler = true
+
+[tui]
+scheduler = false
+```
+
+Relative paths inside `freud.toml` are resolved relative to the directory containing `freud.toml`.
+
 ### Environment Variables (`.env`)
 
 - When `--env-file` is omitted, the orchestrator automatically loads `.env` from the workflow's directory and/or the current working directory (current working directory takes precedence if both exist).

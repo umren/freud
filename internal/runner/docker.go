@@ -117,11 +117,12 @@ func resolveRuntimeSpec(task workflow.Task) (RuntimeSpec, error) {
 
 // DockerRunner executes workflow tasks inside ephemeral Docker containers.
 type DockerRunner struct {
-	cli     *client.Client
-	noCache bool
-	imageMu sync.Mutex
-	out     io.Writer
-	errOut  io.Writer
+	cli         *client.Client
+	noCache     bool
+	includesDir string
+	imageMu     sync.Mutex
+	out         io.Writer
+	errOut      io.Writer
 }
 
 // NewDockerRunner initializes a Docker SDK client using environment settings and API negotiation.
@@ -135,6 +136,11 @@ func NewDockerRunner() (*DockerRunner, error) {
 		out:    os.Stdout,
 		errOut: os.Stderr,
 	}, nil
+}
+
+// SetIncludesDir configures an explicit shared includes directory mounted at /includes.
+func (r *DockerRunner) SetIncludesDir(dir string) {
+	r.includesDir = dir
 }
 
 // SetOutput overrides stdout and stderr writers used for terminal progress and container log echoing.
@@ -236,7 +242,7 @@ func (r *DockerRunner) RunTaskStream(ctx context.Context, runID, hostWorkspace s
 		return &Result{ExitCode: -1, Logs: liveBuf.String()}, err
 	}
 
-	includeMounts, err := resolveIncludeMounts(task)
+	includeMounts, err := resolveIncludeMountsWithDir(task, r.includesDir)
 	if err != nil {
 		return &Result{ExitCode: -1, Logs: liveBuf.String()}, err
 	}
@@ -419,6 +425,10 @@ func buildTaskEnv(task workflow.Task) map[string]string {
 }
 
 func resolveIncludeMounts(task workflow.Task) ([]mount.Mount, error) {
+	return resolveIncludeMountsWithDir(task, "")
+}
+
+func resolveIncludeMountsWithDir(task workflow.Task, configuredIncludesDir string) ([]mount.Mount, error) {
 	baseDir := task.BaseDir
 	if baseDir == "" {
 		baseDir = "."
@@ -429,7 +439,29 @@ func resolveIncludeMounts(task workflow.Task) ([]mount.Mount, error) {
 	}
 	roots := includeSearchRoots(absBase)
 
+	var absConfiguredIncludes string
+	if strings.TrimSpace(configuredIncludesDir) != "" {
+		if absInc, err := filepath.Abs(configuredIncludesDir); err == nil {
+			absConfiguredIncludes = absInc
+		}
+	}
+
 	if len(task.Include) == 0 {
+		if absConfiguredIncludes != "" {
+			if info, err := os.Stat(absConfiguredIncludes); err == nil && info.IsDir() {
+				return []mount.Mount{
+					{
+						Type:     mount.TypeBind,
+						Source:   absConfiguredIncludes,
+						Target:   containerIncludesDir,
+						ReadOnly: true,
+					},
+				}, nil
+			} else if err != nil && !os.IsNotExist(err) {
+				return nil, fmt.Errorf("inspect configured includes directory %q: %w", absConfiguredIncludes, err)
+			}
+		}
+
 		for _, root := range roots {
 			defaultDir := filepath.Join(root, defaultIncludesSubdir)
 			info, err := os.Stat(defaultDir)
@@ -467,7 +499,7 @@ func resolveIncludeMounts(task workflow.Task) ([]mount.Mount, error) {
 			return nil, fmt.Errorf("invalid include path %q for task %q", rel, task.ID)
 		}
 
-		absSource, info, err := locateIncludeSource(roots, cleanRel, rel, task.ID)
+		absSource, info, err := locateIncludeSource(roots, absConfiguredIncludes, cleanRel, rel, task.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -539,7 +571,36 @@ func includeSearchRoots(absBase string) []string {
 	return roots
 }
 
-func locateIncludeSource(roots []string, cleanRel, rawRel, taskID string) (string, os.FileInfo, error) {
+func locateIncludeSource(roots []string, absConfiguredIncludes, cleanRel, rawRel, taskID string) (string, os.FileInfo, error) {
+	if absConfiguredIncludes != "" {
+		var relCandidates []string
+		switch {
+		case cleanRel == defaultIncludesSubdir:
+			relCandidates = append(relCandidates, "")
+		case strings.HasPrefix(cleanRel, defaultIncludesSubdir+"/"):
+			relCandidates = append(relCandidates, strings.TrimPrefix(cleanRel, defaultIncludesSubdir+"/"))
+		default:
+			relCandidates = append(relCandidates, cleanRel)
+		}
+		for _, sub := range relCandidates {
+			candidatePath := absConfiguredIncludes
+			if sub != "" {
+				candidatePath = filepath.Join(absConfiguredIncludes, filepath.FromSlash(sub))
+			}
+			relCheck, err := filepath.Rel(absConfiguredIncludes, candidatePath)
+			if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
+				continue
+			}
+			info, err := os.Stat(candidatePath)
+			if err == nil {
+				return candidatePath, info, nil
+			}
+			if !os.IsNotExist(err) {
+				return "", nil, fmt.Errorf("stat include path %q: %w", rawRel, err)
+			}
+		}
+	}
+
 	for _, root := range roots {
 		absSource := filepath.Join(root, filepath.FromSlash(cleanRel))
 		relCheck, err := filepath.Rel(root, absSource)
