@@ -1,6 +1,6 @@
 # Freud (v0.1)
 
-A pure-Go task orchestrator that parses YAML workflow definitions, resolves task dependencies as a DAG, executes tasks in ephemeral Docker containers, shares data across steps via a per-run workspace directory, and persists execution state and logs in SQLite.
+A pure-Go task orchestrator that parses YAML workflow definitions, resolves task dependencies as a DAG, executes tasks in ephemeral Docker containers, shares data across steps via a per-run workspace directory, and persists execution state and logs in SQLite, PostgreSQL, MySQL, or MariaDB.
 
 ## Features
 
@@ -12,10 +12,10 @@ A pure-Go task orchestrator that parses YAML workflow definitions, resolves task
   - `shell` (or omit `runtime` when `image` is specified, e.g. `alpine:3.20`)
 - **Automatic image pulling & dependency caching**: checks local Docker images, pulls missing ones with live progress, and builds cached Docker image layers (`orchestrator-cache:<hash>`) for tasks with `dependencies` so subsequent runs start immediately without reinstalling packages.
 - **Shared per-run workspace & read-only includes**: creates `./workspaces/<run_id>` on the host (mounted at `/workspace`) and mounts external helper modules/configs from `includes/` (or explicit `include:` paths) read-only at `/includes` with zero file copying.
-- **Reliable log & status capture**: disables `AutoRemove`, waits for container completion, demultiplexes stdout/stderr, prints output, stores logs and exit codes in SQLite, and then removes the container.
-- **Fail-fast execution**: stops the pipeline immediately if a task exits with a non-zero status, marking both the task and the workflow run as `FAILED`.
-- **Cron schedules & embedded Web UI**: workflows support standard 5-field `cron` expressions (and `@hourly`/`@daily`/etc.), and `freud dream` serves an embedded web UI (Go `html/template` + HTMX & Alpine.js) on port `4321` with Dashboard, Flows, Executions, and Includes pages.
-- **SQLite persistence (`orchestrator.db`)**: configured with `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;`.
+- **Reliable log & status capture**: disables `AutoRemove`, waits for container completion, demultiplexes stdout/stderr, prints output, stores logs and exit codes in the database, and then removes the container.
+- **Fail-fast execution & Kill support**: stops the pipeline immediately if a task exits with a non-zero status (`FAILED`), and supports canceling active runs and subflows (`KILLED`) from the Web UI or TUI.
+- **Cron schedules, TUI & embedded Web UI**: workflows support standard 5-field `cron` expressions (and `@hourly`/`@daily`/etc.), `freud tui` provides an interactive Bubbletea terminal UI, and `freud dream` serves an embedded web UI (Go `html/template` + HTMX & Alpine.js) on port `4321`.
+- **Multi-database persistence (pure-Go)**: defaults to local SQLite (`orchestrator.db` with `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;`), and automatically switches to **PostgreSQL**, **MySQL**, or **MariaDB** when given a DSN.
 
 ## Requirements
 
@@ -26,18 +26,20 @@ A pure-Go task orchestrator that parses YAML workflow definitions, resolves task
 
 ```text
 .
-├── main.go                 # CLI entrypoint (`run`, `dream`, `cache`)
-├── flows/                  # Workflow YAML definitions (`etl-example.yaml`, `workspace-audit.yaml`)
+├── main.go                 # CLI entrypoint (`run`, `tui`, `dream`, `cache`)
+├── flows/                  # Workflow YAML definitions (`etl-example.yaml`, `workspace-audit.yaml`, `full-pipeline.yaml`, `kill-demo.yaml`)
 ├── includes/               # Shared helper files mounted read-only at `/includes`
 ├── go.mod
 ├── go.sum
 └── internal/
+    ├── config/             # `freud.toml`, `FREUD_*` env overrides, and path resolution
     ├── cron/               # 5-field cron parser and next-run calculator
     ├── workflow/           # YAML parsing, validation, cycle detection, topological sort
     ├── env/                # .env file loader and task environment merging
-    ├── db/                 # SQLite initialization, WAL pragmas, migrations, state queries
+    ├── format/             # Shared timestamp, duration, and byte-size formatting helpers
+    ├── db/                 # SQLite, PostgreSQL, and MySQL/MariaDB migrations and state store
     ├── runner/             # Docker SDK execution, image pull/cache, log capture, cleanup
-    ├── engine/             # Pipeline orchestration and workspace lifecycle
+    ├── engine/             # Pipeline orchestration, subflows, kill control, workspace lifecycle
     ├── term/               # Terminal ANSI color formatting and ASCII startup banner
     ├── tui/                # Interactive Bubbletea terminal UI (dashboard, flows, logs, run/kill)
     └── ui/                 # Embedded web UI (templates, HTMX/Alpine static assets, HTTP server)
@@ -225,14 +227,34 @@ tasks:
    - Uses the task's `image` (or runtime default if omitted) and executes the script with the available runtime binary (`uv` / `python3` / `python` for Python, `bun` / `deno` / `node` for JS, `sh` for shell).
    - Waits for exit (`ContainerWait`), captures stdout/stderr (`ContainerLogs`), writes logs to console and SQLite, and removes the container (`ContainerRemove`).
 
-## SQLite Database (`orchestrator.db`)
+## Database Backends
 
-On startup, the orchestrator creates `orchestrator.db` (if absent) and applies two tables:
+Freud supports **SQLite**, **PostgreSQL**, **MySQL**, and **MariaDB** out of the box using pure-Go drivers (no CGO required) and automatically runs schema migrations on startup.
 
-- **`runs`**: `id`, `workflow_name`, `status` (`RUNNING`, `SUCCESS`, `FAILED`), `created_at`, `finished_at`
-- **`task_runs`**: `id`, `run_id`, `task_id`, `status`, `exit_code`, `logs`, `started_at`, `finished_at`
+The backend is selected automatically from the `db` setting (`--db`, `FREUD_DB`, or `db` in `freud.toml`):
 
-You can inspect stored runs with Python or `sqlite3`:
+| Backend | Pure-Go Driver | Example `--db` / `FREUD_DB` / `freud.toml` value |
+| --- | --- | --- |
+| **SQLite** *(default)* | `modernc.org/sqlite` | `orchestrator.db` or `./data/freud.db` |
+| **PostgreSQL** | `github.com/jackc/pgx/v5/stdlib` | `postgres://user:pass@localhost:5432/freud?sslmode=disable` |
+| **MySQL** | `github.com/go-sql-driver/mysql` | `mysql://user:pass@localhost:3306/freud` (or `user:pass@tcp(localhost:3306)/freud`) |
+| **MariaDB** | `github.com/go-sql-driver/mysql` | `mariadb://user:pass@localhost:3306/freud` |
+
+Notes:
+- **SQLite** uses `PRAGMA journal_mode=WAL;`, `PRAGMA busy_timeout=5000;`, and `PRAGMA foreign_keys=ON;`; parent directories for relative/custom `.db` file paths are created automatically.
+- **MySQL / MariaDB** connections enforce `utf8mb4` (`LONGTEXT` for `logs` and `definition_json`) and `clientFoundRows=true`.
+- Schema tables created automatically:
+  - **`runs`**: `id`, `workflow_name`, `status` (`RUNNING`, `SUCCESS`, `FAILED`, `KILLED`), `created_at`, `finished_at`, `definition_json`, `parent_run_id`, `parent_task_id`
+  - **`task_runs`**: `id`, `run_id`, `task_id`, `status`, `exit_code`, `logs`, `started_at`, `finished_at`, `runtime`, `image`
+
+Example launching Dream UI or running a flow against PostgreSQL or MariaDB:
+
+```bash
+./freud dream --db "postgres://freud:secret@localhost:5432/freud?sslmode=disable"
+./freud run --db "mariadb://freud:secret@localhost:3306/freud" flows/etl-example.yaml
+```
+
+You can inspect stored runs in SQLite with `sqlite3`:
 
 ```bash
 sqlite3 orchestrator.db "SELECT id, workflow_name, status, created_at, finished_at FROM runs;"
@@ -241,8 +263,15 @@ sqlite3 orchestrator.db "SELECT id, run_id, task_id, status, exit_code FROM task
 
 ## Testing
 
-Run all unit tests (workflow validation, SQLite pragmas/store, and engine orchestration with a mock runner):
+Run all unit tests (including SQLite store, config, workflow validation, engine orchestration, TUI, and Web UI):
 
 ```bash
-go test -v ./...
+go test -race ./...
+```
+
+To also run the database integration tests against live PostgreSQL and MySQL/MariaDB instances:
+
+```bash
+FREUD_TEST_POSTGRES_DSN="postgres://freud:freud@127.0.0.1:5432/freud?sslmode=disable" go test -v -race ./internal/db
+FREUD_TEST_MYSQL_DSN="mysql://freud:freud@127.0.0.1:3306/freud" go test -v -race ./internal/db
 ```
