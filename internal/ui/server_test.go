@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -477,5 +479,225 @@ func TestUIAuthSetupLoginUsersAndAudit(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
 		t.Fatalf("expected invalidated session to redirect to /login, got %d", rec.Code)
+	}
+}
+
+func TestRESTAPIAuthTokensAndEndpoints(t *testing.T) {
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	includesDir := filepath.Join(tmp, "includes")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(includesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	flowYAML := `name: api-flow
+cron: "*/10 * * * *"
+tasks:
+  - id: ping
+    runtime: python
+    script: print("ok")
+`
+	if err := os.WriteFile(filepath.Join(flowsDir, "api.yaml"), []byte(flowYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := db.Open(filepath.Join(tmp, "restapi.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer store.Close()
+
+	kr := &mockKillRunner{store: store}
+	srv, err := NewServer(store, Config{
+		Addr:        ":4321",
+		FlowsDir:    flowsDir,
+		IncludesDir: includesDir,
+		Runner:      kr,
+		EnableAuth:  true,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	h := srv.Handler()
+
+	// 1. /api/v1/health is public and reports setup_required=true before /setup.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"setup_required": true`) {
+		t.Fatalf("unexpected health before setup: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Protected API endpoints return 409 JSON (not HTML redirect) before initial admin exists.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/flows", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "/setup") {
+		t.Fatalf("expected 409 JSON before setup, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 2. Run /setup as admin and verify /api/v1/flows rejects unauthenticated calls with 401 JSON.
+	setupForm := url.Values{
+		"username":         {"admin"},
+		"password":         {"adminpass12"},
+		"confirm_password": {"adminpass12"},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/setup", strings.NewReader(setupForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("setup failed: %d", rec.Code)
+	}
+	var adminCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			adminCookie = c
+			break
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/flows", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("expected 401 JSON without credentials, got %d ct=%q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+
+	// 3. Create an admin API token via POST /api/v1/tokens (using session cookie).
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"admin-cli"}`))
+	req.AddCookie(adminCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 creating admin token, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var tokResp struct {
+		Token string       `json:"token"`
+		Meta  apiTokenView `json:"meta"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tokResp); err != nil || !strings.HasPrefix(tokResp.Token, "frd_") {
+		t.Fatalf("unexpected token response: err=%v body=%s", err, rec.Body.String())
+	}
+
+	// 4. Use Bearer token to create member 'ci' and check /api/v1/me, /api/v1/flows, /api/v1/flows/api.yaml.
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(`{"username":"ci","password":"cipass123","is_admin":false}`))
+	req.Header.Set("Authorization", "Bearer "+tokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 creating user via API, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/flows/api.yaml", nil)
+	req.Header.Set("Authorization", "Bearer "+tokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"name": "api-flow"`) {
+		t.Fatalf("expected 200 flow detail JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 5. Log in as 'ci' via /login, create a UI token at POST /tokens, then trigger & kill a run via API.
+	loginForm := url.Values{"username": {"ci"}, "password": {"cipass123"}}
+	req = httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(loginForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var ciCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			ciCookie = c
+			break
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/tokens", strings.NewReader(url.Values{"name": {"ci-runner"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(ciCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "frd_") {
+		t.Fatalf("expected /tokens to render one-time raw token, got %d", rec.Code)
+	}
+
+	// Create a second token via API for 'ci' so we can capture raw value cleanly in JSON.
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"ci-json"}`))
+	req.AddCookie(ciCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var ciTokResp struct {
+		Token string       `json:"token"`
+		Meta  apiTokenView `json:"meta"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &ciTokResp); err != nil {
+		t.Fatalf("parse ci token response: %v", err)
+	}
+
+	// Member cannot create users via API (403).
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(`{"username":"bob","password":"bobpass123"}`))
+	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 creating user as non-admin via API, got %d", rec.Code)
+	}
+
+	// Trigger flow run as 'ci' via Bearer token.
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/flows/api.yaml/run", nil)
+	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), `"triggered_by": "ci"`) {
+		t.Fatalf("expected 202 run response triggered by ci, got %d: %s", rec.Code, rec.Body.String())
+	}
+	srv.Wait()
+
+	// Seed active run 'run-live-1' and verify execution detail + kill via API.
+	if err := store.CreateRunFull(context.Background(), "run-live-1", "api-flow", "", "", "", "ci"); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/executions/run-live-1", nil)
+	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"triggered_by": "ci"`) {
+		t.Fatalf("expected 200 execution detail, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/executions/run-live-1/kill", nil)
+	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status": "KILLED"`) {
+		t.Fatalf("expected 200 KILLED response, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Audit log endpoint includes source="api" and token metadata.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/audit?action=FLOW_RUN", nil)
+	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"source": "api"`) || !strings.Contains(rec.Body.String(), "token=ci-json") {
+		t.Fatalf("expected API audit log entry, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Revoking token immediately invalidates Bearer auth.
+	req = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/tokens/%d", ciTokResp.Meta.ID), nil)
+	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 revoking own token, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 after token revoked, got %d", rec.Code)
 	}
 }

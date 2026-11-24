@@ -233,6 +233,79 @@ tasks:
    - Uses the task's `image` (or runtime default if omitted) and executes the script with the available runtime binary (`uv` / `python3` / `python` for Python, `bun` / `deno` / `node` for JS, `sh` for shell).
    - Waits for exit (`ContainerWait`), captures stdout/stderr (`ContainerLogs`), writes logs to console and SQLite, and removes the container (`ContainerRemove`).
 
+## REST API (`/api/v1`)
+
+`./freud dream` also serves a JSON REST API on the same port (`4321` by default) for CI/CD triggers, scripts, and monitoring.
+
+### Authentication & API Tokens
+
+* Generate a personal Bearer token (`frd_...`) in the Web UI under **Users & Audit (`/audit`) → API Tokens** or via `POST /api/v1/tokens` (signed in with a browser session cookie or existing token).
+* Pass the token in the `Authorization` header:
+
+```bash
+export FREUD_TOKEN="frd_your_token_here"
+curl -s -H "Authorization: Bearer $FREUD_TOKEN" http://localhost:4321/api/v1/flows | jq
+```
+
+* Every API action (`FLOW_RUN`, `FLOW_KILL`, `USER_CREATED`, `USER_DELETED`, `TOKEN_CREATED`, `TOKEN_REVOKED`) is recorded in `audit_logs` with `source: "api"` and the token name in `details`.
+* Error responses use JSON (`{"error": "..."}`) with standard status codes:
+  * `401 Unauthorized` — missing, invalid, or revoked Bearer token / session cookie
+  * `403 Forbidden` — admin privileges required (`POST/DELETE /api/v1/users`, or revoking another user's token as non-admin)
+  * `409 Conflict` — Dream UI authentication is enabled, and initial admin `/setup` has not been completed yet (except `GET /api/v1/health`)
+* When `./freud dream --no-auth` is active, API endpoints work without a token (except `/api/v1/tokens`, which requires authentication to be enabled).
+
+### Endpoints
+
+| Method | Path | Auth / Role | Description |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/health` | Public | Server health (`status`, `auth_enabled`, `setup_required`, `scheduler_on`) |
+| `GET` | `/api/v1/me` | Any user | Current authenticated user (`username`, `is_admin`, `created_at`) |
+| `GET` | `/api/v1/flows` | Any user | List discovered workflows in `flows/` with cron schedule and latest run |
+| `GET` | `/api/v1/flows/{file}` | Any user | Flow details, parsed task list, raw YAML, and recent runs |
+| `POST` | `/api/v1/flows/{file}/run` | Any user | Start workflow execution asynchronously (`202 Accepted` with `run_id`) |
+| `GET` | `/api/v1/executions` | Any user | Run stats + list runs (`?status=RUNNING\|SUCCESS\|FAILED\|KILLED&limit=50`) |
+| `GET` | `/api/v1/executions/{id}` | Any user | Execution metadata, child subflow runs, and task runs including logs |
+| `POST` | `/api/v1/executions/{id}/kill` | Any user | Terminate an active run and record `KILLED` status |
+| `GET` | `/api/v1/audit` | Any user | Activity audit log (`?action=FLOW_RUN&limit=100`) |
+| `GET` | `/api/v1/users` | Any user | List registered accounts (without password hashes) |
+| `POST` | `/api/v1/users` | **Admin only** | Create user (`{"username","password","is_admin"}`) |
+| `DELETE` | `/api/v1/users/{username}` | **Admin only** | Delete user account (revokes sessions & API tokens) |
+| `GET` | `/api/v1/tokens` | Any user | List API tokens (admins see all tokens; members see their own) |
+| `POST` | `/api/v1/tokens` | Any user | Issue a new API token (`{"name":"github-ci"}`) — raw token returned once |
+| `DELETE` | `/api/v1/tokens/{id}` | Owner or Admin | Revoke an API token by ID |
+
+### Quick Examples
+
+Trigger a flow and poll its status + task logs:
+
+```bash
+# 1. Start etl-example.yaml
+RUN_ID=$(curl -s -X POST \
+  -H "Authorization: Bearer $FREUD_TOKEN" \
+  http://localhost:4321/api/v1/flows/etl-example.yaml/run | jq -r '.run_id')
+
+# 2. Inspect execution status, exit codes, and logs
+curl -s -H "Authorization: Bearer $FREUD_TOKEN" \
+  "http://localhost:4321/api/v1/executions/$RUN_ID" | jq
+
+# 3. Kill a running execution if needed
+curl -s -X POST -H "Authorization: Bearer $FREUD_TOKEN" \
+  "http://localhost:4321/api/v1/executions/$RUN_ID/kill" | jq
+```
+
+Create a user (admin token required) and inspect recent audit events:
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $FREUD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"ci-bot","password":"strong-password","is_admin":false}' \
+  http://localhost:4321/api/v1/users | jq
+
+curl -s -H "Authorization: Bearer $FREUD_TOKEN" \
+  "http://localhost:4321/api/v1/audit?limit=20" | jq
+```
+
 ## Database Backends
 
 Freud supports **SQLite**, **PostgreSQL**, **MySQL**, and **MariaDB** out of the box using pure-Go drivers (no CGO required) and automatically runs schema migrations on startup.
@@ -254,6 +327,7 @@ Notes:
   - **`task_runs`**: `id`, `run_id`, `task_id`, `status`, `exit_code`, `logs`, `started_at`, `finished_at`, `runtime`, `image`
   - **`users`**: `id`, `username`, `password_hash`, `is_admin`, `created_at`
   - **`sessions`**: `token`, `username`, `expires_at`, `created_at`
+  - **`api_tokens`**: `id`, `username`, `name`, `prefix`, `token_hash`, `last_used_at`, `created_at`
   - **`audit_logs`**: `id`, `username`, `action`, `target`, `source`, `details`, `created_at`
 
 Example launching Dream UI or running a flow against PostgreSQL or MariaDB:

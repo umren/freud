@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -117,30 +118,67 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) findFlowEntry(w http.ResponseWriter, fileName string) (*workflow.WorkflowEntry, bool) {
+func (s *Server) findFlowEntryResult(fileName string) (*workflow.WorkflowEntry, int, error) {
 	if fileName == "" || strings.ContainsAny(fileName, "/\\") || fileName == "." || fileName == ".." {
-		http.NotFound(w, nil)
-		return nil, false
+		return nil, http.StatusNotFound, fmt.Errorf("workflow not found")
 	}
 
 	entries, err := workflow.LoadDir(s.cfg.FlowsDir)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return nil, false
+		return nil, http.StatusInternalServerError, err
 	}
 
 	for i := range entries {
 		if entries[i].FileName == fileName {
 			if entries[i].ParseErr != nil {
-				http.Error(w, fmt.Sprintf("invalid workflow %q: %v", fileName, entries[i].ParseErr), http.StatusBadRequest)
-				return nil, false
+				return nil, http.StatusBadRequest, fmt.Errorf("invalid workflow %q: %w", fileName, entries[i].ParseErr)
 			}
-			return &entries[i], true
+			return &entries[i], http.StatusOK, nil
 		}
 	}
 
-	http.NotFound(w, nil)
-	return nil, false
+	return nil, http.StatusNotFound, fmt.Errorf("workflow %q not found", fileName)
+}
+
+func (s *Server) findFlowEntry(w http.ResponseWriter, fileName string) (*workflow.WorkflowEntry, bool) {
+	matched, status, err := s.findFlowEntryResult(fileName)
+	if err != nil {
+		if status == http.StatusNotFound {
+			http.NotFound(w, nil)
+		} else {
+			http.Error(w, err.Error(), status)
+		}
+		return nil, false
+	}
+	return matched, true
+}
+
+func (s *Server) launchFlowAsync(auditCtx context.Context, actor, source, extraDetails string, wf *workflow.Workflow) (string, int, error) {
+	if s.runner == nil {
+		return "", http.StatusServiceUnavailable, fmt.Errorf("execution runner is not configured")
+	}
+
+	runCtx := engine.WithTriggeredBy(s.runCtx, actor)
+	runID, doneCh, err := s.runner.StartAsync(runCtx, wf)
+	if err != nil {
+		return "", http.StatusInternalServerError, fmt.Errorf("start workflow %q: %w", wf.Name, err)
+	}
+
+	details := "run_id=" + runID
+	if extraDetails != "" {
+		details += ", " + extraDetails
+	}
+	_ = s.store.RecordAudit(auditCtx, actor, "FLOW_RUN", wf.Name, source, details)
+
+	s.wg.Add(1)
+	go func(name, id string, ch <-chan error) {
+		defer s.wg.Done()
+		if runErr := <-ch; runErr != nil {
+			fmt.Fprintf(os.Stderr, "[ui] Manual run %s (%s) failed: %v\n", id, name, runErr)
+		}
+	}(wf.Name, runID, doneCh)
+
+	return runID, http.StatusAccepted, nil
 }
 
 func (s *Server) handleFlowDetail(w http.ResponseWriter, r *http.Request) {
@@ -205,32 +243,16 @@ func (s *Server) handleFlowDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRunFlow(w http.ResponseWriter, r *http.Request) {
-	if s.runner == nil {
-		http.Error(w, "execution runner is not configured", http.StatusServiceUnavailable)
-		return
-	}
-
 	matched, ok := s.findFlowEntry(w, r.PathValue("file"))
 	if !ok {
 		return
 	}
 
-	actor := s.actorName(r)
-	runCtx := engine.WithTriggeredBy(s.runCtx, actor)
-	runID, doneCh, err := s.runner.StartAsync(runCtx, matched.Workflow)
+	runID, status, err := s.launchFlowAsync(r.Context(), s.actorName(r), "dream", "", matched.Workflow)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("start workflow %q: %v", matched.Workflow.Name, err), http.StatusInternalServerError)
+		http.Error(w, err.Error(), status)
 		return
 	}
-	_ = s.store.RecordAudit(r.Context(), actor, "FLOW_RUN", matched.Workflow.Name, "dream", "run_id="+runID)
-
-	s.wg.Add(1)
-	go func(name, id string, ch <-chan error) {
-		defer s.wg.Done()
-		if runErr := <-ch; runErr != nil {
-			fmt.Fprintf(os.Stderr, "[ui] Manual run %s (%s) failed: %v\n", id, name, runErr)
-		}
-	}(matched.Workflow.Name, runID, doneCh)
 
 	target := "/executions/" + runID
 	if r.Header.Get("HX-Request") == "true" {

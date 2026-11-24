@@ -36,6 +36,17 @@ type AuditLogRecord struct {
 	CreatedAt string
 }
 
+// APITokenRecord represents a row in the api_tokens table (never storing plaintext tokens).
+type APITokenRecord struct {
+	ID         int64
+	Username   string
+	Name       string
+	Prefix     string
+	TokenHash  string
+	LastUsedAt sql.NullString
+	CreatedAt  string
+}
+
 // HasAdmin reports whether at least one admin account exists.
 func (s *Store) HasAdmin(ctx context.Context) (bool, error) {
 	var cnt int
@@ -148,6 +159,9 @@ func (s *Store) DeleteUser(ctx context.Context, username string) error {
 			return ErrLastAdmin
 		}
 	}
+	if _, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM api_tokens WHERE username = ?`), username); err != nil {
+		return fmt.Errorf("delete user api tokens %q: %w", username, err)
+	}
 	if _, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM sessions WHERE username = ?`), username); err != nil {
 		return fmt.Errorf("delete user sessions %q: %w", username, err)
 	}
@@ -248,4 +262,98 @@ func (s *Store) ListAuditLogs(ctx context.Context, limit int, actionFilter strin
 		logs = append(logs, rec)
 	}
 	return logs, rows.Err()
+}
+
+// CreateAPIToken persists a hashed API token belonging to username.
+func (s *Store) CreateAPIToken(ctx context.Context, username, name, prefix, tokenHash string) (*APITokenRecord, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(
+		ctx,
+		s.rebind(`INSERT INTO api_tokens (username, name, prefix, token_hash, created_at) VALUES (?, ?, ?, ?, ?)`),
+		strings.TrimSpace(username), strings.TrimSpace(name), prefix, tokenHash, now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create api token: %w", err)
+	}
+
+	var rec APITokenRecord
+	err = s.db.QueryRowContext(
+		ctx,
+		s.rebind(`SELECT id, username, name, prefix, token_hash, last_used_at, created_at FROM api_tokens WHERE token_hash = ?`),
+		tokenHash,
+	).Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.LastUsedAt, &rec.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("load created api token: %w", err)
+	}
+	return &rec, nil
+}
+
+// ListAPITokens returns stored API token metadata ordered newest-first; empty username lists all tokens.
+func (s *Store) ListAPITokens(ctx context.Context, username string) ([]APITokenRecord, error) {
+	query := `SELECT id, username, name, prefix, token_hash, last_used_at, created_at FROM api_tokens`
+	var args []any
+	if u := strings.TrimSpace(username); u != "" {
+		query += ` WHERE username = ?`
+		args = append(args, u)
+	}
+	query += ` ORDER BY id DESC`
+
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list api tokens: %w", err)
+	}
+	defer rows.Close()
+
+	var tokens []APITokenRecord
+	for rows.Next() {
+		var rec APITokenRecord
+		if err := rows.Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.LastUsedAt, &rec.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan api token: %w", err)
+		}
+		tokens = append(tokens, rec)
+	}
+	return tokens, rows.Err()
+}
+
+// GetUserByAPITokenHash resolves a SHA-256 token hash to its owning UserRecord and updates last_used_at.
+func (s *Store) GetUserByAPITokenHash(ctx context.Context, tokenHash string) (*UserRecord, *APITokenRecord, error) {
+	var rec APITokenRecord
+	err := s.db.QueryRowContext(
+		ctx,
+		s.rebind(`SELECT id, username, name, prefix, token_hash, last_used_at, created_at FROM api_tokens WHERE token_hash = ?`),
+		tokenHash,
+	).Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.LastUsedAt, &rec.CreatedAt)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get api token: %w", err)
+	}
+
+	u, err := s.GetUserByUsername(ctx, rec.Username)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = s.db.ExecContext(ctx, s.rebind(`UPDATE api_tokens SET last_used_at = ? WHERE id = ?`), now, rec.ID)
+	rec.LastUsedAt = sql.NullString{String: now, Valid: true}
+	return u, &rec, nil
+}
+
+// DeleteAPIToken revokes a token by ID if owned by actorUsername or actorIsAdmin is true.
+func (s *Store) DeleteAPIToken(ctx context.Context, id int64, actorUsername string, actorIsAdmin bool) (*APITokenRecord, error) {
+	var rec APITokenRecord
+	err := s.db.QueryRowContext(
+		ctx,
+		s.rebind(`SELECT id, username, name, prefix, token_hash, last_used_at, created_at FROM api_tokens WHERE id = ?`),
+		id,
+	).Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.LastUsedAt, &rec.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if !actorIsAdmin && rec.Username != strings.TrimSpace(actorUsername) {
+		return nil, fmt.Errorf("forbidden: cannot revoke another user's token")
+	}
+	if _, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM api_tokens WHERE id = ?`), id); err != nil {
+		return nil, fmt.Errorf("delete api token %d: %w", id, err)
+	}
+	return &rec, nil
 }

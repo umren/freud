@@ -2,11 +2,13 @@ package ui
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +20,10 @@ const sessionCookieName = "freud_session"
 
 type authCtxKey string
 
-const currentUserCtxKey authCtxKey = "freud_current_user"
+const (
+	currentUserCtxKey authCtxKey = "freud_current_user"
+	apiTokenCtxKey    authCtxKey = "freud_api_token"
+)
 
 type authPageViewData struct {
 	Title    string
@@ -43,13 +48,24 @@ type auditRowView struct {
 	SearchKey  string
 }
 
+type apiTokenRowView struct {
+	ID         int64
+	Username   string
+	Name       string
+	Prefix     string
+	LastUsedAt string
+	CreatedAt  string
+}
+
 type auditViewData struct {
 	basePageData
 	Users        []userRowView
+	Tokens       []apiTokenRowView
 	AuditLogs    []auditRowView
 	ActionFilter string
 	FlashMsg     string
 	FlashErr     string
+	NewRawToken  string
 }
 
 func userFromRequest(r *http.Request) *db.UserRecord {
@@ -60,6 +76,23 @@ func userFromRequest(r *http.Request) *db.UserRecord {
 		return u
 	}
 	return nil
+}
+
+func apiTokenFromRequest(r *http.Request) *db.APITokenRecord {
+	if r == nil {
+		return nil
+	}
+	if tok, ok := r.Context().Value(apiTokenCtxKey).(*db.APITokenRecord); ok {
+		return tok
+	}
+	return nil
+}
+
+func (s *Server) auditSource(r *http.Request, defaultSource string) (string, string) {
+	if tok := apiTokenFromRequest(r); tok != nil {
+		return "api", "token=" + tok.Name
+	}
+	return defaultSource, ""
 }
 
 func (s *Server) actorName(r *http.Request) string {
@@ -77,31 +110,66 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		p := r.URL.Path
-		if strings.HasPrefix(p, "/static/") || p == "/setup" || p == "/login" {
+		if strings.HasPrefix(p, "/static/") || p == "/setup" || p == "/login" || p == "/api/v1/health" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
+		isAPI := strings.HasPrefix(p, "/api/")
+
 		hasAdmin, err := s.store.HasAdmin(r.Context())
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			if isAPI {
+				writeAPIError(w, http.StatusInternalServerError, err.Error())
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 			return
 		}
 		if !hasAdmin {
-			redirectOrHTMX(w, r, "/setup")
+			if isAPI {
+				writeAPIError(w, http.StatusConflict, "initial admin setup required at /setup")
+			} else {
+				redirectOrHTMX(w, r, "/setup")
+			}
+			return
+		}
+
+		if authHdr := strings.TrimSpace(r.Header.Get("Authorization")); len(authHdr) > 7 && strings.EqualFold(authHdr[:7], "bearer ") {
+			rawTok := strings.TrimSpace(authHdr[7:])
+			u, tokRec, err := s.store.GetUserByAPITokenHash(r.Context(), auth.HashAPIToken(rawTok))
+			if err != nil {
+				if isAPI {
+					writeAPIError(w, http.StatusUnauthorized, "invalid or revoked API token")
+				} else {
+					http.Error(w, "invalid or revoked API token", http.StatusUnauthorized)
+				}
+				return
+			}
+			ctx := context.WithValue(r.Context(), currentUserCtxKey, u)
+			ctx = context.WithValue(ctx, apiTokenCtxKey, tokRec)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
 		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil || strings.TrimSpace(cookie.Value) == "" {
-			redirectOrHTMX(w, r, "/login")
+			if isAPI {
+				writeAPIError(w, http.StatusUnauthorized, "authentication required")
+			} else {
+				redirectOrHTMX(w, r, "/login")
+			}
 			return
 		}
 
 		u, err := s.store.GetSessionUser(r.Context(), cookie.Value)
 		if err != nil {
 			clearSessionCookie(w)
-			redirectOrHTMX(w, r, "/login")
+			if isAPI {
+				writeAPIError(w, http.StatusUnauthorized, "authentication required")
+			} else {
+				redirectOrHTMX(w, r, "/login")
+			}
 			return
 		}
 
@@ -306,6 +374,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
+	s.renderAuditWithState(w, r, r.URL.Query().Get("msg"), r.URL.Query().Get("err"), "")
+}
+
+func (s *Server) renderAuditWithState(w http.ResponseWriter, r *http.Request, flashMsg, flashErr, newRawToken string) {
 	actionFilter := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("action")))
 	stats, err := s.store.GetRunStats(r.Context())
 	if err != nil {
@@ -317,6 +389,17 @@ func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	var tokenOwner string
+	if cur := userFromRequest(r); s.cfg.EnableAuth && cur != nil && !cur.IsAdmin {
+		tokenOwner = cur.Username
+	}
+	tokensRaw, err := s.store.ListAPITokens(r.Context(), tokenOwner)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	logsRaw, err := s.store.ListAuditLogs(r.Context(), 200, actionFilter)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -329,6 +412,22 @@ func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
 			Username:  u.Username,
 			IsAdmin:   u.IsAdmin,
 			CreatedAt: formatTimestamp(u.CreatedAt),
+		})
+	}
+
+	tokens := make([]apiTokenRowView, 0, len(tokensRaw))
+	for _, t := range tokensRaw {
+		lastUsed := "Never"
+		if t.LastUsedAt.Valid && t.LastUsedAt.String != "" {
+			lastUsed = formatTimestamp(t.LastUsedAt.String)
+		}
+		tokens = append(tokens, apiTokenRowView{
+			ID:         t.ID,
+			Username:   t.Username,
+			Name:       t.Name,
+			Prefix:     t.Prefix,
+			LastUsedAt: lastUsed,
+			CreatedAt:  formatTimestamp(t.CreatedAt),
 		})
 	}
 
@@ -350,11 +449,64 @@ func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
 	s.renderPage(w, "audit", auditViewData{
 		basePageData: base,
 		Users:        users,
+		Tokens:       tokens,
 		AuditLogs:    logs,
 		ActionFilter: actionFilter,
-		FlashMsg:     r.URL.Query().Get("msg"),
-		FlashErr:     r.URL.Query().Get("err"),
+		FlashMsg:     flashMsg,
+		FlashErr:     flashErr,
+		NewRawToken:  newRawToken,
 	})
+}
+
+func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
+	cur := userFromRequest(r)
+	if !s.cfg.EnableAuth || cur == nil {
+		http.Redirect(w, r, "/audit?err="+url.QueryEscape("API tokens require authentication to be enabled"), http.StatusSeeOther)
+		return
+	}
+
+	name, err := auth.ValidateTokenName(r.FormValue("name"))
+	if err != nil {
+		http.Redirect(w, r, "/audit?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	raw, prefix, hash, err := auth.NewAPIToken()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, err := s.store.CreateAPIToken(r.Context(), cur.Username, name, prefix, hash); err != nil {
+		http.Redirect(w, r, "/audit?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+
+	_ = s.store.RecordAudit(r.Context(), cur.Username, "TOKEN_CREATED", name, "dream", "prefix="+prefix)
+	// Render directly so the one-time token never appears in URL query parameters or browser history.
+	s.renderAuditWithState(w, r, fmt.Sprintf("Created API token %q — copy it now, it will not be shown again.", name), "", raw)
+}
+
+func (s *Server) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
+	cur := userFromRequest(r)
+	if !s.cfg.EnableAuth || cur == nil {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Redirect(w, r, "/audit?err="+url.QueryEscape("Invalid token ID"), http.StatusSeeOther)
+		return
+	}
+	deleted, err := s.store.DeleteAPIToken(r.Context(), id, cur.Username, cur.IsAdmin)
+	if err != nil {
+		msg := err.Error()
+		if errors.Is(err, sql.ErrNoRows) {
+			msg = "API token not found"
+		}
+		http.Redirect(w, r, "/audit?err="+url.QueryEscape(msg), http.StatusSeeOther)
+		return
+	}
+	_ = s.store.RecordAudit(r.Context(), cur.Username, "TOKEN_REVOKED", deleted.Name, "dream", "owner="+deleted.Username)
+	http.Redirect(w, r, "/audit?msg="+url.QueryEscape(fmt.Sprintf("Revoked API token %q", deleted.Name)), http.StatusSeeOther)
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -450,9 +602,9 @@ func clientRateKey(r *http.Request, username string) string {
 
 func auditActionSlug(action string) string {
 	switch strings.ToUpper(strings.TrimSpace(action)) {
-	case "FLOW_RUN", "SETUP_ADMIN", "USER_CREATED":
+	case "FLOW_RUN", "SETUP_ADMIN", "USER_CREATED", "TOKEN_CREATED":
 		return "success"
-	case "FLOW_KILL", "USER_DELETED":
+	case "FLOW_KILL", "USER_DELETED", "TOKEN_REVOKED":
 		return "killed"
 	case "LOGIN", "PASSWORD_CHANGED":
 		return "running"

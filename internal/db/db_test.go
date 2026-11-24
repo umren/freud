@@ -364,6 +364,23 @@ func runStoreUsersAndAuditChecks(t *testing.T, store *Store) {
 		t.Fatalf("UpdateUserPassword: %v", err)
 	}
 
+	// API tokens: create, resolve, update last_used_at, list, revoke, and cascade on user delete.
+	tokRec, err := store.CreateAPIToken(ctx, "alice", "alice-ci", "frd_alice", "sha256-alice-1")
+	if err != nil || tokRec.Name != "alice-ci" {
+		t.Fatalf("CreateAPIToken: %+v err=%v", tokRec, err)
+	}
+	tokUser, loadedTok, err := store.GetUserByAPITokenHash(ctx, "sha256-alice-1")
+	if err != nil || tokUser.Username != "alice" || !loadedTok.LastUsedAt.Valid {
+		t.Fatalf("GetUserByAPITokenHash: user=%+v tok=%+v err=%v", tokUser, loadedTok, err)
+	}
+	aliceTokens, err := store.ListAPITokens(ctx, "alice")
+	if err != nil || len(aliceTokens) != 1 {
+		t.Fatalf("ListAPITokens: %+v err=%v", aliceTokens, err)
+	}
+	if _, err := store.DeleteAPIToken(ctx, tokRec.ID, "bob", false); err == nil {
+		t.Fatalf("expected non-admin other user revoke to fail")
+	}
+
 	// Sessions: valid vs expired.
 	if err := store.CreateSession(ctx, "tok-valid", "alice", time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateSession valid: %v", err)
@@ -384,6 +401,9 @@ func runStoreUsersAndAuditChecks(t *testing.T, store *Store) {
 	}
 	if _, err := store.GetSessionUser(ctx, "tok-valid"); err == nil {
 		t.Fatalf("expected alice session deleted when alice deleted")
+	}
+	if _, _, err := store.GetUserByAPITokenHash(ctx, "sha256-alice-1"); err == nil {
+		t.Fatalf("expected alice api token deleted when alice deleted")
 	}
 
 	// Audit logs.

@@ -9,6 +9,17 @@
 {{if .FlashMsg}}
 <div class="alert-success">{{.FlashMsg}}</div>
 {{end}}
+{{if .NewRawToken}}
+<div class="card" style="margin-bottom:18px;border-color:var(--accent)">
+  <div class="card-head">
+    <h2 class="card-title">New API Token (Shown Once)</h2>
+  </div>
+  <div class="card-body">
+    <div class="muted" style="font-size:12px;margin-bottom:8px">Use in HTTP header: <span class="mono">Authorization: Bearer &lt;token&gt;</span></div>
+    <pre class="mono" style="margin:0;padding:10px 12px;background:rgba(0,0,0,0.28);border-radius:6px;overflow-x:auto;user-select:all">{{.NewRawToken}}</pre>
+  </div>
+</div>
+{{end}}
 {{if .FlashErr}}
 <div class="alert-error">{{.FlashErr}}</div>
 {{end}}
@@ -91,6 +102,52 @@
   </section>
 </div>
 
+<section class="card" style="margin-bottom:18px">
+  <div class="card-head">
+    <h2 class="card-title">API Tokens ({{len .Tokens}})</h2>
+    {{if and .AuthEnabled .CurrentUser}}
+    <form method="post" action="/tokens" class="toolbar">
+      <input class="input" type="text" name="name" placeholder="Token label (e.g. github-ci)" required>
+      <button type="submit" class="btn btn-primary">Generate Token</button>
+    </form>
+    {{end}}
+  </div>
+  {{if and .AuthEnabled .CurrentUser}}
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Owner</th>
+        <th>Prefix</th>
+        <th>Last Used</th>
+        <th>Created</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Tokens}}
+      <tr>
+        <td class="mono"><strong>{{.Name}}</strong></td>
+        <td class="mono">{{.Username}}</td>
+        <td class="mono muted">{{.Prefix}}...</td>
+        <td class="mono muted">{{.LastUsedAt}}</td>
+        <td class="mono muted">{{.CreatedAt}}</td>
+        <td style="text-align:right">
+          <form method="post" action="/tokens/{{.ID}}/delete" style="display:inline">
+            <button type="submit" class="btn btn-danger" style="padding:3px 9px;font-size:11px">Revoke</button>
+          </form>
+        </td>
+      </tr>
+      {{else}}
+      <tr><td colspan="6" class="muted">No API tokens created yet. Generate one to call <span class="mono">/api/v1/*</span>.</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="card-body muted">API tokens require authentication to be enabled (currently running with <span class="mono">--no-auth</span>).</div>
+  {{end}}
+</section>
+
 <section class="card" x-data="{ query: '' }">
   <div class="card-head">
     <h2 class="card-title">Audit Log ({{len .AuditLogs}})</h2>
@@ -107,6 +164,8 @@
           <option value="USER_CREATED" {{if eq .ActionFilter "USER_CREATED"}}selected{{end}}>USER_CREATED</option>
           <option value="USER_DELETED" {{if eq .ActionFilter "USER_DELETED"}}selected{{end}}>USER_DELETED</option>
           <option value="PASSWORD_CHANGED" {{if eq .ActionFilter "PASSWORD_CHANGED"}}selected{{end}}>PASSWORD_CHANGED</option>
+          <option value="TOKEN_CREATED" {{if eq .ActionFilter "TOKEN_CREATED"}}selected{{end}}>TOKEN_CREATED</option>
+          <option value="TOKEN_REVOKED" {{if eq .ActionFilter "TOKEN_REVOKED"}}selected{{end}}>TOKEN_REVOKED</option>
         </select>
       </form>
     </div>

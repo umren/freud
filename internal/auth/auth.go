@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os/user"
@@ -71,6 +72,33 @@ func NewSessionToken() (string, error) {
 		return "", fmt.Errorf("generate session token: %w", err)
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+// ValidateTokenName checks that an API token label is 1-64 characters after trimming.
+func ValidateTokenName(name string) (string, error) {
+	n := strings.TrimSpace(name)
+	if len(n) == 0 || len(n) > 64 {
+		return "", fmt.Errorf("token name must be 1-64 characters")
+	}
+	return n, nil
+}
+
+// NewAPIToken generates a new raw API token ("frd_<hex>"), its display prefix, and its SHA-256 hex digest.
+func NewAPIToken() (raw, prefix, hash string, err error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", "", "", fmt.Errorf("generate api token: %w", err)
+	}
+	raw = "frd_" + hex.EncodeToString(buf)
+	prefix = raw[:12]
+	hash = HashAPIToken(raw)
+	return raw, prefix, hash, nil
+}
+
+// HashAPIToken computes the SHA-256 hex digest used to store and look up API tokens.
+func HashAPIToken(raw string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+	return hex.EncodeToString(sum[:])
 }
 
 // SessionExpiry returns the standard expiration timestamp for a newly created session.

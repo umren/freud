@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -258,30 +259,35 @@ func (s *Server) handleExecutionDetailPartial(w http.ResponseWriter, r *http.Req
 	s.renderPartial(w, "execution_detail_content", data)
 }
 
-func (s *Server) handleKillExecution(w http.ResponseWriter, r *http.Request) {
+func (s *Server) killRunByID(ctx context.Context, runID, actor, source, details string) (int, error) {
 	kr, ok := s.runner.(KillableFlowRunner)
 	if !ok {
-		http.Error(w, "execution killer is not configured", http.StatusServiceUnavailable)
-		return
+		return http.StatusServiceUnavailable, fmt.Errorf("execution killer is not configured")
 	}
 
-	runID := r.PathValue("id")
-	if _, err := s.store.GetRun(r.Context(), runID); err != nil {
+	if _, err := s.store.GetRun(ctx, runID); err != nil {
 		if strings.Contains(err.Error(), "no rows") {
-			http.NotFound(w, r)
-			return
+			return http.StatusNotFound, fmt.Errorf("execution %q not found", runID)
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return http.StatusInternalServerError, err
 	}
 
 	err := kr.Kill(runID)
 	if err != nil && !errors.Is(err, engine.ErrRunNotActive) {
-		http.Error(w, fmt.Sprintf("kill run %q: %v", runID, err), http.StatusInternalServerError)
-		return
+		return http.StatusInternalServerError, fmt.Errorf("kill run %q: %v", runID, err)
 	}
 	if err == nil {
-		_ = s.store.RecordAudit(r.Context(), s.actorName(r), "FLOW_KILL", runID, "dream", "")
+		_ = s.store.RecordAudit(ctx, actor, "FLOW_KILL", runID, source, details)
+	}
+	return http.StatusOK, nil
+}
+
+func (s *Server) handleKillExecution(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("id")
+	status, err := s.killRunByID(r.Context(), runID, s.actorName(r), "dream", "")
+	if err != nil {
+		http.Error(w, err.Error(), status)
+		return
 	}
 
 	if r.Header.Get("HX-Request") == "true" {

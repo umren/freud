@@ -36,6 +36,18 @@ func TestPasswordAndValidation(t *testing.T) {
 	if err != nil || len(tok) != 64 {
 		t.Fatalf("unexpected session token: %q err=%v", tok, err)
 	}
+
+	if _, err := ValidateTokenName("   "); err == nil {
+		t.Fatalf("expected empty token name error")
+	}
+	name, err := ValidateTokenName(" github-ci ")
+	if err != nil || name != "github-ci" {
+		t.Fatalf("unexpected token name result: %q err=%v", name, err)
+	}
+	raw, prefix, tokenHash, err := NewAPIToken()
+	if err != nil || len(raw) != 68 || prefix != raw[:12] || tokenHash != HashAPIToken(raw) {
+		t.Fatalf("unexpected api token: raw=%q prefix=%q hash=%q err=%v", raw, prefix, tokenHash, err)
+	}
 }
 
 func TestLoginLimiterAndEnsureAdminFromEnv(t *testing.T) {
