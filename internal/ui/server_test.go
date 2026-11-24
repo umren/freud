@@ -684,6 +684,22 @@ tasks:
 		t.Fatalf("expected API audit log entry, got %d: %s", rec.Code, rec.Body.String())
 	}
 
+	// Protected HTTP MCP endpoint (/mcp) requires auth, then executes tools as the token user.
+	req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on unauthenticated /mcp, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_flows","arguments":{}}}`))
+	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "api-flow") {
+		t.Fatalf("expected 200 list_flows on authenticated /mcp, got %d: %s", rec.Code, rec.Body.String())
+	}
+
 	// Revoking token immediately invalidates Bearer auth.
 	req = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/tokens/%d", ciTokResp.Meta.ID), nil)
 	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)

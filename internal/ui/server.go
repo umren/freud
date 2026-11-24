@@ -12,6 +12,7 @@ import (
 
 	"freud/internal/auth"
 	"freud/internal/db"
+	"freud/internal/mcp"
 	"freud/internal/workflow"
 )
 
@@ -46,6 +47,7 @@ type Server struct {
 	runner    AsyncFlowRunner
 	runCtx    context.Context
 	limiter   *auth.LoginLimiter
+	mcpSrv    *mcp.Server
 	wg        sync.WaitGroup
 	pages     map[string]*template.Template
 	partials  *template.Template
@@ -116,11 +118,16 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 	}
 
 	return &Server{
-		store:     store,
-		cfg:       cfg,
-		runner:    cfg.Runner,
-		runCtx:    runCtx,
-		limiter:   auth.NewLoginLimiter(10, 5*time.Minute),
+		store:   store,
+		cfg:     cfg,
+		runner:  cfg.Runner,
+		runCtx:  runCtx,
+		limiter: auth.NewLoginLimiter(10, 5*time.Minute),
+		mcpSrv: mcp.NewServer(store, mcp.Config{
+			FlowsDir: cfg.FlowsDir,
+			Runner:   cfg.Runner,
+			RunCtx:   runCtx,
+		}),
 		pages:     pages,
 		partials:  partials,
 		staticHnd: http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))),
@@ -170,12 +177,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tokens", s.handleAPITokensList)
 	mux.HandleFunc("POST /api/v1/tokens", s.handleAPICreateToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.handleAPIDeleteToken)
+	mux.HandleFunc("/mcp", s.handleMCP)
 	return s.authMiddleware(mux)
 }
 
-// Wait blocks until all manually triggered UI runs finish.
+func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	_, tokNote := s.auditSource(r, "http")
+	ctx := mcp.WithActor(r.Context(), s.actorName(r), tokNote)
+	s.mcpSrv.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// Wait blocks until all manually triggered UI and MCP runs finish.
 func (s *Server) Wait() {
 	s.wg.Wait()
+	s.mcpSrv.Wait()
 }
 
 func (s *Server) newBaseData(r *http.Request, title, nav string, runningCount int) basePageData {

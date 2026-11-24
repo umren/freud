@@ -115,7 +115,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		isAPI := strings.HasPrefix(p, "/api/")
+		isAPI := strings.HasPrefix(p, "/api/") || p == "/mcp"
 
 		hasAdmin, err := s.store.HasAdmin(r.Context())
 		if err != nil {

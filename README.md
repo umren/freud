@@ -42,7 +42,8 @@ A pure-Go task orchestrator that parses YAML workflow definitions, resolves task
     ├── engine/             # Pipeline orchestration, subflows, kill control, workspace lifecycle
     ├── term/               # Terminal ANSI color formatting and ASCII startup banner
     ├── tui/                # Interactive Bubbletea terminal UI (dashboard, flows, logs, run/kill)
-    └── ui/                 # Embedded web UI (templates, HTMX/Alpine static assets, HTTP server)
+    ├── mcp/                # Model Context Protocol (MCP) server (stdio & Streamable HTTP)
+    └── ui/                 # Embedded web UI, REST API v1, and HTTP /mcp endpoint
 ```
 
 ## Build
@@ -304,6 +305,52 @@ curl -s -X POST \
 
 curl -s -H "Authorization: Bearer $FREUD_TOKEN" \
   "http://localhost:4321/api/v1/audit?limit=20" | jq
+```
+
+## MCP Server (Model Context Protocol)
+
+Freud embeds a zero-dependency **MCP JSON-RPC 2.0 server** inside the same binary, supporting both **local `stdio`** (`./freud mcp`) and **remote Streamable HTTP** (`POST /mcp` on `./freud dream`).
+
+### Exposed Tools & Resources
+
+- **Tools**:
+  - `list_flows` — list discovered YAML flows, cron schedules, and latest run status
+  - `get_flow` (`{file}`) — inspect workflow tasks, dependencies, raw YAML, and recent runs
+  - `run_flow` (`{file, wait?, timeout_seconds?}`) — trigger a workflow asynchronously or wait (up to 300s) for completion & task logs
+  - `list_executions` (`{status?, limit?}`) — query execution history and status stats
+  - `get_execution` (`{run_id}`) — inspect execution status, `triggered_by`, child subflows, and task logs
+  - `kill_execution` (`{run_id}`) — terminate an active `RUNNING` execution
+  - `list_audit_logs` (`{action?, limit?}`) — query activity audit trail
+- **Resources**:
+  - `freud://flows/{file}` (`text/yaml`) via `resources/list` and `resources/read`
+
+### Local `stdio` Mode (`./freud mcp`)
+
+Runs passwordless as your OS user by default (`source: "mcp"`, `details: "stdio"`), or attributes runs to a specific Freud account with `--token` / `FREUD_MCP_TOKEN`. All orchestrator output goes to `stderr` so `stdout` carries clean JSON-RPC frames.
+
+Example MCP client config (Claude Desktop, Cursor, Antigravity, etc.):
+
+```json
+{
+  "mcpServers": {
+    "freud": {
+      "command": "/path/to/freud",
+      "args": ["mcp", "--config", "/path/to/freud.toml"]
+    }
+  }
+}
+```
+
+### Remote HTTP Mode (`/mcp` in `./freud dream`)
+
+`POST http://localhost:4321/mcp` accepts MCP JSON-RPC 2.0 requests using the same `Authorization: Bearer frd_...` token (or session cookie) and logs all tool executions in `audit_logs` under the token owner with `source: "mcp"`:
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $FREUD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  http://localhost:4321/mcp | jq
 ```
 
 ## Database Backends

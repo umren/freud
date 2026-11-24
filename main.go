@@ -21,6 +21,7 @@ import (
 	"freud/internal/engine"
 	"freud/internal/env"
 	"freud/internal/format"
+	"freud/internal/mcp"
 	"freud/internal/runner"
 	"freud/internal/term"
 	"freud/internal/tui"
@@ -51,6 +52,8 @@ func runCLI(args []string) error {
 		return runDreamCmd(args[1:])
 	case "tui":
 		return runTUICmd(args[1:])
+	case "mcp":
+		return runMCPCmd(args[1:])
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -390,6 +393,68 @@ func runTUICmd(args []string) error {
 	return err
 }
 
+func runMCPCmd(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var b cliFlagBindings
+	registerCommonFlags(fs, &b)
+	var token string
+	fs.StringVar(&token, "token", "", "Optional Freud API token (or FREUD_MCP_TOKEN) to attribute MCP actions to a specific user")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Reserve stdout strictly for MCP JSON-RPC frames; redirect any stray stdout output to stderr.
+	mcpIn := os.Stdin
+	mcpOut := os.Stdout
+	os.Stdout = os.Stderr
+
+	cfg, err := config.Load(b.toOverrides(fs))
+	if err != nil {
+		return err
+	}
+
+	rt, err := openRuntime(cfg, "", true)
+	if err != nil {
+		return err
+	}
+	defer rt.close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	actorName := auth.LocalActor()
+	actorDetails := "stdio"
+	token = strings.TrimSpace(token)
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("FREUD_MCP_TOKEN"))
+	}
+	if token != "" {
+		u, tokRec, err := rt.store.GetUserByAPITokenHash(ctx, auth.HashAPIToken(token))
+		if err != nil {
+			return fmt.Errorf("invalid MCP API token: %w", err)
+		}
+		actorName = u.Username
+		actorDetails = "token=" + tokRec.Name
+	}
+
+	mcpSrv := mcp.NewServer(rt.store, mcp.Config{
+		FlowsDir: cfg.FlowsDir,
+		Runner:   rt.eng,
+		RunCtx:   ctx,
+		OnLog: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "[mcp] "+format+"\n", args...)
+		},
+	})
+
+	serveCtx := mcp.WithActor(ctx, actorName, actorDetails)
+	err = mcpSrv.ServeStdio(serveCtx, mcpIn, mcpOut)
+	stop()
+	mcpSrv.Wait()
+	rt.eng.Wait()
+	return err
+}
+
 func runCacheCmd(args []string) error {
 	if len(args) != 1 {
 		printUsage()
@@ -477,6 +542,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--no-cache] <workflow.yaml>\n", term.Key(c, "freud run"))
 	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--scheduler] [--no-cache]\n", term.Key(c, "freud tui"))
 	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--port 4321] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--scheduler] [--no-auth] [--no-cache]\n", term.Key(c, "freud dream"))
+	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--token frd_...] [--no-cache]\n", term.Key(c, "freud mcp"))
 	fmt.Fprintf(os.Stderr, "  %s\n", term.Key(c, "freud cache ls"))
 	fmt.Fprintf(os.Stderr, "  %s\n", term.Key(c, "freud cache clear"))
 }

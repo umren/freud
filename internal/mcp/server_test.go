@@ -1,0 +1,163 @@
+package mcp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"freud/internal/db"
+	"freud/internal/engine"
+	"freud/internal/workflow"
+)
+
+type mockMCPRunner struct {
+	store    *db.Store
+	killedID string
+}
+
+func (m *mockMCPRunner) StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error) {
+	actor := engine.TriggeredByFromContext(ctx)
+	runID := "mcp-run-1"
+	if err := m.store.CreateRunFull(ctx, runID, wf.Name, "", "", "", actor); err != nil {
+		return "", nil, err
+	}
+	trID, err := m.store.CreateTaskRunWithMeta(ctx, runID, "step1", "python", "python:3.13-slim")
+	if err != nil {
+		return "", nil, err
+	}
+	_ = m.store.FinishTaskRun(ctx, trID, db.StatusSuccess, 0, "hello from mcp")
+	_ = m.store.FinishRun(ctx, runID, db.StatusSuccess)
+
+	ch := make(chan error, 1)
+	close(ch)
+	return runID, ch, nil
+}
+
+func (m *mockMCPRunner) Kill(runID string) error {
+	m.killedID = runID
+	return m.store.FinishRun(context.Background(), runID, db.StatusKilled)
+}
+
+func setupMCPTestServer(t *testing.T) (*Server, *db.Store, *mockMCPRunner) {
+	t.Helper()
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	flowYAML := `name: mcp-demo
+cron: "0 * * * *"
+tasks:
+  - id: step1
+    runtime: python
+    script: print("hi")
+`
+	if err := os.WriteFile(filepath.Join(flowsDir, "mcp.yaml"), []byte(flowYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := db.Open(filepath.Join(tmp, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	runner := &mockMCPRunner{store: store}
+	srv := NewServer(store, Config{
+		FlowsDir: flowsDir,
+		Runner:   runner,
+	})
+	return srv, store, runner
+}
+
+func TestMCPStdioLifecycleAndTools(t *testing.T) {
+	srv, store, _ := setupMCPTestServer(t)
+
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_flows","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"run_flow","arguments":{"file":"mcp.yaml","wait":true}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_audit_logs","arguments":{"action":"FLOW_RUN"}}}`,
+		`{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"freud://flows/mcp.yaml"}}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	ctx := WithActor(context.Background(), "agent-alice", "token=dev")
+	if err := srv.ServeStdio(ctx, strings.NewReader(input), &out); err != nil {
+		t.Fatalf("ServeStdio failed: %v", err)
+	}
+	srv.Wait()
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	// Notification produces no response line, so 6 responses expected.
+	if len(lines) != 6 {
+		t.Fatalf("expected 6 JSON-RPC responses, got %d:\n%s", len(lines), out.String())
+	}
+
+	var initResp jsonRPCResponse
+	if err := json.Unmarshal([]byte(lines[0]), &initResp); err != nil || initResp.Error != nil {
+		t.Fatalf("unexpected init response: %s (%v)", lines[0], err)
+	}
+	if !strings.Contains(lines[1], "run_flow") || !strings.Contains(lines[1], "kill_execution") {
+		t.Fatalf("tools/list missing expected tools: %s", lines[1])
+	}
+	if !strings.Contains(lines[2], "mcp-demo") {
+		t.Fatalf("list_flows missing mcp-demo: %s", lines[2])
+	}
+	if !strings.Contains(lines[3], "hello from mcp") || !strings.Contains(lines[3], "agent-alice") {
+		t.Fatalf("run_flow wait=true missing logs or actor: %s", lines[3])
+	}
+	if !strings.Contains(lines[4], `"source": "mcp"`) && !strings.Contains(lines[4], `\"source\": \"mcp\"`) {
+		t.Fatalf("list_audit_logs missing mcp source: %s", lines[4])
+	}
+	if !strings.Contains(lines[5], "print(\\\"hi\\\")") && !strings.Contains(lines[5], "mcp-demo") {
+		t.Fatalf("resources/read missing YAML content: %s", lines[5])
+	}
+
+	runRec, err := store.GetRun(context.Background(), "mcp-run-1")
+	if err != nil || runRec.TriggeredBy.String != "agent-alice" {
+		t.Fatalf("expected run triggered_by=agent-alice, got %+v err=%v", runRec, err)
+	}
+}
+
+func TestMCPHTTPAndKillTool(t *testing.T) {
+	srv, store, runner := setupMCPTestServer(t)
+
+	if err := store.CreateRunFull(context.Background(), "live-mcp-run", "mcp-demo", "", "", "", "admin"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Notification returns 202 Accepted.
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 for notification, got %d", rec.Code)
+	}
+
+	// Tool call kill_execution over HTTP.
+	callBody := `{"jsonrpc":"2.0","id":"k1","method":"tools/call","params":{"name":"kill_execution","arguments":{"run_id":"live-mcp-run"}}}`
+	req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(callBody))
+	req = req.WithContext(WithActor(req.Context(), "admin", "token=ops"))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || runner.killedID != "live-mcp-run" || !strings.Contains(rec.Body.String(), "KILLED") {
+		t.Fatalf("unexpected kill_execution HTTP result: code=%d killed=%q body=%s", rec.Code, runner.killedID, rec.Body.String())
+	}
+
+	// GET returns 405 cleanly per Streamable HTTP when SSE is unsupported.
+	req = httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on GET /mcp, got %d", rec.Code)
+	}
+}
