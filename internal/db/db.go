@@ -55,9 +55,10 @@ type RunRecord struct {
 	DefinitionJSON sql.NullString
 	ParentRunID    sql.NullString
 	ParentTaskID   sql.NullString
+	TriggeredBy    sql.NullString
 }
 
-const runSelectCols = `id, workflow_name, status, created_at, finished_at, definition_json, parent_run_id, parent_task_id`
+const runSelectCols = `id, workflow_name, status, created_at, finished_at, definition_json, parent_run_id, parent_task_id, triggered_by`
 
 // TaskRunRecord represents a row in the task_runs table.
 type TaskRunRecord struct {
@@ -265,7 +266,8 @@ func (s *Store) migrate() error {
 	finished_at TEXT,
 	definition_json TEXT,
 	parent_run_id TEXT,
-	parent_task_id TEXT
+	parent_task_id TEXT,
+	triggered_by TEXT
 )`,
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS task_runs (
 	id %s,
@@ -280,8 +282,31 @@ func (s *Store) migrate() error {
 	image TEXT,
 	FOREIGN KEY (run_id) REFERENCES runs(id)
 )`, idCol, exitCodeCol),
+		`CREATE TABLE IF NOT EXISTS users (
+	id ` + idCol + `,
+	username TEXT NOT NULL UNIQUE,
+	password_hash TEXT NOT NULL,
+	is_admin INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL
+)`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+	token TEXT PRIMARY KEY,
+	username TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	created_at TEXT NOT NULL
+)`,
+		`CREATE TABLE IF NOT EXISTS audit_logs (
+	id ` + idCol + `,
+	username TEXT NOT NULL,
+	action TEXT NOT NULL,
+	target TEXT,
+	source TEXT NOT NULL,
+	details TEXT,
+	created_at TEXT NOT NULL
+)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC)`,
 	}
 
 	for _, stmt := range statements {
@@ -298,6 +323,7 @@ func (s *Store) migrate() error {
 		{"runs", "definition_json", "TEXT"},
 		{"runs", "parent_run_id", "TEXT"},
 		{"runs", "parent_task_id", "TEXT"},
+		{"runs", "triggered_by", "TEXT"},
 		{"task_runs", "runtime", "TEXT"},
 		{"task_runs", "image", "TEXT"},
 	}
@@ -328,6 +354,7 @@ func (s *Store) migrateMySQL() error {
 	definition_json LONGTEXT,
 	parent_run_id VARCHAR(128),
 	parent_task_id VARCHAR(255),
+	triggered_by VARCHAR(128),
 	INDEX idx_runs_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS task_runs (
@@ -343,6 +370,29 @@ func (s *Store) migrateMySQL() error {
 	image VARCHAR(255),
 	INDEX idx_task_runs_run_id (run_id),
 	CONSTRAINT fk_task_runs_run_id FOREIGN KEY (run_id) REFERENCES runs(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS users (
+	id BIGINT AUTO_INCREMENT PRIMARY KEY,
+	username VARCHAR(128) NOT NULL UNIQUE,
+	password_hash VARCHAR(255) NOT NULL,
+	is_admin INT NOT NULL DEFAULT 0,
+	created_at VARCHAR(64) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+	token VARCHAR(128) PRIMARY KEY,
+	username VARCHAR(128) NOT NULL,
+	expires_at VARCHAR(64) NOT NULL,
+	created_at VARCHAR(64) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS audit_logs (
+	id BIGINT AUTO_INCREMENT PRIMARY KEY,
+	username VARCHAR(128) NOT NULL,
+	action VARCHAR(64) NOT NULL,
+	target VARCHAR(255),
+	source VARCHAR(32) NOT NULL,
+	details LONGTEXT,
+	created_at VARCHAR(64) NOT NULL,
+	INDEX idx_audit_logs_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
 
@@ -360,6 +410,7 @@ func (s *Store) migrateMySQL() error {
 		{"runs", "definition_json", "LONGTEXT"},
 		{"runs", "parent_run_id", "VARCHAR(128)"},
 		{"runs", "parent_task_id", "VARCHAR(255)"},
+		{"runs", "triggered_by", "VARCHAR(128)"},
 		{"task_runs", "runtime", "VARCHAR(64)"},
 		{"task_runs", "image", "VARCHAR(255)"},
 	}
@@ -423,11 +474,16 @@ func (s *Store) CreateRunWithDefinition(ctx context.Context, runID, workflowName
 
 // CreateRunWithParent inserts a new workflow run with optional definition snapshot and parent link.
 func (s *Store) CreateRunWithParent(ctx context.Context, runID, workflowName, definitionJSON, parentRunID, parentTaskID string) error {
+	return s.CreateRunFull(ctx, runID, workflowName, definitionJSON, parentRunID, parentTaskID, "")
+}
+
+// CreateRunFull inserts a new workflow run with optional definition snapshot, parent link, and trigger actor.
+func (s *Store) CreateRunFull(ctx context.Context, runID, workflowName, definitionJSON, parentRunID, parentTaskID, triggeredBy string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(
 		ctx,
-		s.rebind(`INSERT INTO runs (id, workflow_name, status, created_at, definition_json, parent_run_id, parent_task_id) VALUES (?, ?, ?, ?, ?, ?, ?)`),
-		runID, workflowName, StatusRunning, now, nullString(definitionJSON), nullString(parentRunID), nullString(parentTaskID),
+		s.rebind(`INSERT INTO runs (id, workflow_name, status, created_at, definition_json, parent_run_id, parent_task_id, triggered_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+		runID, workflowName, StatusRunning, now, nullString(definitionJSON), nullString(parentRunID), nullString(parentTaskID), nullString(triggeredBy),
 	)
 	if err != nil {
 		return fmt.Errorf("insert run %q: %w", runID, err)
@@ -547,6 +603,7 @@ func (s *Store) GetRun(ctx context.Context, runID string) (*RunRecord, error) {
 		&rec.DefinitionJSON,
 		&rec.ParentRunID,
 		&rec.ParentTaskID,
+		&rec.TriggeredBy,
 	); err != nil {
 		return nil, fmt.Errorf("get run %q: %w", runID, err)
 	}
@@ -608,7 +665,7 @@ func (s *Store) ListChildRuns(ctx context.Context, parentRunID string) ([]RunRec
 // GetLatestRunByWorkflow returns the most recent RunRecord keyed by workflow_name.
 func (s *Store) GetLatestRunByWorkflow(ctx context.Context) (map[string]RunRecord, error) {
 	runs, err := s.queryRuns(ctx, `
-		SELECT r.id, r.workflow_name, r.status, r.created_at, r.finished_at, r.definition_json, r.parent_run_id, r.parent_task_id
+		SELECT r.id, r.workflow_name, r.status, r.created_at, r.finished_at, r.definition_json, r.parent_run_id, r.parent_task_id, r.triggered_by
 		FROM runs r
 		INNER JOIN (
 			SELECT workflow_name, MAX(created_at) AS max_created
@@ -645,6 +702,7 @@ func (s *Store) queryRuns(ctx context.Context, query string, args ...any) ([]Run
 			&rec.DefinitionJSON,
 			&rec.ParentRunID,
 			&rec.ParentTaskID,
+			&rec.TriggeredBy,
 		); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}

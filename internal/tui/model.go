@@ -11,7 +11,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"freud/internal/auth"
 	"freud/internal/db"
+	"freud/internal/engine"
 )
 
 type tabID int
@@ -20,6 +22,7 @@ const (
 	tabDashboard tabID = iota
 	tabFlows
 	tabExecutions
+	tabAudit
 )
 
 const (
@@ -57,6 +60,10 @@ type Model struct {
 	autoFollow    bool
 	lastLogLen    int
 	logVP         viewport.Model
+
+	// Audit tab state
+	auditFilterIdx int
+	auditIdx       int
 
 	// Transient feedback banner
 	toastText  string
@@ -112,7 +119,7 @@ func (m *Model) currentFilter() string {
 }
 
 func (m *Model) refreshCmd() tea.Cmd {
-	return loadSnapshotCmd(m.cfg.Store, m.cfg.FlowsDir, m.currentFilter(), m.selectedRunID)
+	return loadSnapshotCmd(m.cfg.Store, m.cfg.FlowsDir, m.currentFilter(), m.selectedRunID, m.currentAuditFilter())
 }
 
 func (m *Model) setToast(text string, isErr bool) {
@@ -208,8 +215,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "3":
 		m.activeTab = tabExecutions
 		return m, m.refreshCmd()
+	case "4":
+		m.activeTab = tabAudit
+		return m, m.refreshCmd()
 	case "tab":
-		m.activeTab = (m.activeTab + 1) % 3
+		m.activeTab = (m.activeTab + 1) % 4
 		return m, m.refreshCmd()
 	case "R":
 		return m, m.refreshCmd()
@@ -222,6 +232,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFlowsKey(key)
 	case tabExecutions:
 		return m.handleExecutionsKey(msg)
+	case tabAudit:
+		return m.handleAuditKey(key)
 	}
 	return m, nil
 }
@@ -253,12 +265,18 @@ func (m *Model) triggerSelectedFlow() tea.Cmd {
 	wf := entry.Workflow
 	ctx := m.cfg.Ctx
 	runner := m.cfg.Runner
+	store := m.cfg.Store
 	wg := m.wg
 
 	return func() tea.Msg {
-		runID, doneCh, err := runner.StartAsync(ctx, wf)
+		actor := auth.LocalActor()
+		runCtx := engine.WithTriggeredBy(ctx, actor)
+		runID, doneCh, err := runner.StartAsync(runCtx, wf)
 		if err != nil {
 			return runStartedMsg{name: wf.Name, err: err}
+		}
+		if store != nil {
+			_ = store.RecordAudit(context.Background(), actor, "FLOW_RUN", wf.Name, "tui", "run_id="+runID)
 		}
 		wg.Add(1)
 		go func(ch <-chan error) {
@@ -275,8 +293,12 @@ func (m *Model) killRunCmd(runID string) tea.Cmd {
 		return nil
 	}
 	runner := m.cfg.Runner
+	store := m.cfg.Store
 	return func() tea.Msg {
 		err := runner.Kill(runID)
+		if err == nil && store != nil {
+			_ = store.RecordAudit(context.Background(), auth.LocalActor(), "FLOW_KILL", runID, "tui", "")
+		}
 		return runKilledMsg{runID: runID, err: err}
 	}
 }
@@ -311,6 +333,12 @@ func (m *Model) clampCursors() {
 		m.childIdx = 0
 	} else if m.childIdx >= len(m.snap.ChildRuns) {
 		m.childIdx = len(m.snap.ChildRuns) - 1
+	}
+
+	if len(m.snap.AuditLogs) == 0 {
+		m.auditIdx = 0
+	} else if m.auditIdx >= len(m.snap.AuditLogs) {
+		m.auditIdx = len(m.snap.AuditLogs) - 1
 	}
 }
 
@@ -387,6 +415,8 @@ func (m *Model) View() string {
 		body = m.renderFlows()
 	case tabExecutions:
 		body = m.renderExecutions()
+	case tabAudit:
+		body = m.renderAudit()
 	}
 	parts = append(parts, body)
 
@@ -413,6 +443,7 @@ func (m *Model) renderHeader() string {
 		{tabDashboard, "1 Dashboard"},
 		{tabFlows, "2 Flows"},
 		{tabExecutions, "3 Executions"},
+		{tabAudit, "4 Audit"},
 	}
 
 	var tabBar []string
@@ -444,7 +475,7 @@ func (m *Model) renderHeader() string {
 
 func (m *Model) renderFooter() string {
 	var hints []string
-	hints = append(hints, styleKeyHint.Render("1/2/3/Tab")+" views")
+	hints = append(hints, styleKeyHint.Render("1-4/Tab")+" views")
 	switch m.activeTab {
 	case tabDashboard:
 		hints = append(hints, styleKeyHint.Render("↑/↓")+" select", styleKeyHint.Render("Enter")+" logs", styleKeyHint.Render("k")+" kill")
@@ -460,6 +491,8 @@ func (m *Model) renderFooter() string {
 		} else {
 			hints = append(hints, styleKeyHint.Render("←/→")+" task", styleKeyHint.Render("↑/↓ g/G")+" scroll", styleKeyHint.Render("a")+" follow", styleKeyHint.Render("k")+" kill", styleKeyHint.Render("Esc")+" back")
 		}
+	case tabAudit:
+		hints = append(hints, styleKeyHint.Render("↑/↓")+" select", styleKeyHint.Render("f")+" filter action")
 	}
 	hints = append(hints, styleKeyHint.Render("R")+" refresh", styleKeyHint.Render("q")+" quit")
 	return " " + strings.Join(hints, styleMuted.Render(" · "))

@@ -49,7 +49,7 @@ func (s *Server) handleIncludes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := includesViewData{
-		basePageData: s.newBaseData("Includes", "includes", stats.Running),
+		basePageData: s.newBaseData(r, "Includes", "includes", stats.Running),
 		IncludesDir:  s.cfg.IncludesDir,
 		Files:        files,
 		SelectedRel:  selected,

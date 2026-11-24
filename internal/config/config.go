@@ -27,6 +27,7 @@ const (
 type DreamConfig struct {
 	Port      int  `toml:"port"`
 	Scheduler bool `toml:"scheduler"`
+	NoAuth    bool `toml:"no_auth"`
 }
 
 // TUIConfig configures the interactive terminal UI.
@@ -59,6 +60,7 @@ type Overrides struct {
 	NoCache       *bool
 	DreamPort     *int
 	Scheduler     *bool
+	NoAuth        *bool
 }
 
 // Default returns Config populated with standard out-of-the-box defaults.
@@ -240,6 +242,13 @@ func applyEnvVars(cfg *Config) error {
 		cfg.Dream.Scheduler = b
 		cfg.TUI.Scheduler = b
 	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_NO_AUTH")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid FREUD_NO_AUTH %q: %w", v, err)
+		}
+		cfg.Dream.NoAuth = b
+	}
 	return nil
 }
 
@@ -269,5 +278,8 @@ func applyOverrides(cfg *Config, ov Overrides) {
 	if ov.Scheduler != nil {
 		cfg.Dream.Scheduler = *ov.Scheduler
 		cfg.TUI.Scheduler = *ov.Scheduler
+	}
+	if ov.NoAuth != nil {
+		cfg.Dream.NoAuth = *ov.NoAuth
 	}
 }

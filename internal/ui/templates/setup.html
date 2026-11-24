@@ -1,0 +1,24 @@
+{{define "auth_content"}}
+<h1 class="page-title" style="font-size:19px;margin-bottom:6px">Initial Admin Setup</h1>
+<p class="page-sub" style="margin-top:0;margin-bottom:18px">No administrator account exists yet. Create your admin password to unlock Dream UI.</p>
+
+{{if .Error}}
+<div class="alert-error">{{.Error}}</div>
+{{end}}
+
+<form method="post" action="/setup" class="auth-form">
+  <label class="auth-label">
+    <span>Admin Username</span>
+    <input class="input" type="text" name="username" value="{{if .Username}}{{.Username}}{{else}}admin{{end}}" required autocomplete="username">
+  </label>
+  <label class="auth-label">
+    <span>Password (min 6 characters)</span>
+    <input class="input" type="password" name="password" required autocomplete="new-password" autofocus>
+  </label>
+  <label class="auth-label">
+    <span>Confirm Password</span>
+    <input class="input" type="password" name="confirm_password" required autocomplete="new-password">
+  </label>
+  <button type="submit" class="btn btn-primary" style="width:100%;padding:9px 14px;margin-top:4px">Create Admin &amp; Sign In</button>
+</form>
+{{end}}

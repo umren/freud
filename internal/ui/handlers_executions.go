@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +22,7 @@ type runRowView struct {
 	Duration     string
 	ParentRunID  string
 	ParentTaskID string
+	TriggeredBy  string
 	SearchKey    string
 }
 
@@ -66,7 +66,8 @@ type runSnapshot struct {
 	} `json:"tasks"`
 }
 
-func (s *Server) buildExecutionsData(ctx context.Context, statusFilter string) (executionsViewData, error) {
+func (s *Server) buildExecutionsData(r *http.Request, statusFilter string) (executionsViewData, error) {
+	ctx := r.Context()
 	statusFilter = strings.ToUpper(strings.TrimSpace(statusFilter))
 	switch statusFilter {
 	case "", db.StatusSuccess, db.StatusFailed, db.StatusRunning, db.StatusKilled:
@@ -84,14 +85,14 @@ func (s *Server) buildExecutionsData(ctx context.Context, statusFilter string) (
 	}
 
 	return executionsViewData{
-		basePageData: s.newBaseData("Executions", "executions", stats.Running),
+		basePageData: s.newBaseData(r, "Executions", "executions", stats.Running),
 		StatusFilter: statusFilter,
 		Runs:         toRunRowViews(runs, time.Now()),
 	}, nil
 }
 
 func (s *Server) handleExecutions(w http.ResponseWriter, r *http.Request) {
-	data, err := s.buildExecutionsData(r.Context(), r.URL.Query().Get("status"))
+	data, err := s.buildExecutionsData(r, r.URL.Query().Get("status"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -100,7 +101,7 @@ func (s *Server) handleExecutions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExecutionsPartial(w http.ResponseWriter, r *http.Request) {
-	data, err := s.buildExecutionsData(r.Context(), r.URL.Query().Get("status"))
+	data, err := s.buildExecutionsData(r, r.URL.Query().Get("status"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -108,7 +109,8 @@ func (s *Server) handleExecutionsPartial(w http.ResponseWriter, r *http.Request)
 	s.renderPartial(w, "executions_table", data)
 }
 
-func (s *Server) buildExecutionDetailData(ctx context.Context, runID string) (executionDetailViewData, bool, error) {
+func (s *Server) buildExecutionDetailData(r *http.Request, runID string) (executionDetailViewData, bool, error) {
+	ctx := r.Context()
 	runRec, err := s.store.GetRun(ctx, runID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no rows") {
@@ -221,7 +223,7 @@ func (s *Server) buildExecutionDetailData(ctx context.Context, runID string) (ex
 
 	_, canKill := s.runner.(KillableFlowRunner)
 	return executionDetailViewData{
-		basePageData: s.newBaseData(runRec.WorkflowName+" · "+runRec.ID, "executions", stats.Running),
+		basePageData: s.newBaseData(r, runRec.WorkflowName+" · "+runRec.ID, "executions", stats.Running),
 		Run:          runView,
 		Tasks:        taskViews,
 		ChildRuns:    toRunRowViews(childRecs, now),
@@ -231,7 +233,7 @@ func (s *Server) buildExecutionDetailData(ctx context.Context, runID string) (ex
 }
 
 func (s *Server) handleExecutionDetail(w http.ResponseWriter, r *http.Request) {
-	data, found, err := s.buildExecutionDetailData(r.Context(), r.PathValue("id"))
+	data, found, err := s.buildExecutionDetailData(r, r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -244,7 +246,7 @@ func (s *Server) handleExecutionDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExecutionDetailPartial(w http.ResponseWriter, r *http.Request) {
-	data, found, err := s.buildExecutionDetailData(r.Context(), r.PathValue("id"))
+	data, found, err := s.buildExecutionDetailData(r, r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -273,13 +275,17 @@ func (s *Server) handleKillExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := kr.Kill(runID); err != nil && !errors.Is(err, engine.ErrRunNotActive) {
+	err := kr.Kill(runID)
+	if err != nil && !errors.Is(err, engine.ErrRunNotActive) {
 		http.Error(w, fmt.Sprintf("kill run %q: %v", runID, err), http.StatusInternalServerError)
 		return
 	}
+	if err == nil {
+		_ = s.store.RecordAudit(r.Context(), s.actorName(r), "FLOW_KILL", runID, "dream", "")
+	}
 
 	if r.Header.Get("HX-Request") == "true" {
-		data, found, err := s.buildExecutionDetailData(r.Context(), runID)
+		data, found, err := s.buildExecutionDetailData(r, runID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -321,7 +327,8 @@ func toRunRowViews(records []db.RunRecord, now time.Time) []runRowView {
 			Duration:     durStr,
 			ParentRunID:  r.ParentRunID.String,
 			ParentTaskID: r.ParentTaskID.String,
-			SearchKey:    strings.ToLower(r.ID + " " + r.WorkflowName + " " + r.Status),
+			TriggeredBy:  r.TriggeredBy.String,
+			SearchKey:    strings.ToLower(r.ID + " " + r.WorkflowName + " " + r.Status + " " + r.TriggeredBy.String),
 		})
 	}
 	return views

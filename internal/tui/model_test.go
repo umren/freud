@@ -243,4 +243,24 @@ func TestTUIDashboardExecutionsFilterMultiTaskAndSubflows(t *testing.T) {
 	if !strings.Contains(m.View(), "child-run") || strings.Contains(m.View(), "parent-run") {
 		t.Fatalf("expected only child-run under SUCCESS filter, got:\n%s", m.View())
 	}
+
+	// Switch to Audit tab ('4') and verify audit logs & filter cycling.
+	if err := store.RecordAudit(ctx, "admin", "LOGIN", "", "web", "signed in"); err != nil {
+		t.Fatalf("RecordAudit LOGIN: %v", err)
+	}
+	if err := store.RecordAudit(ctx, "local", "FLOW_RUN", "sample", "tui", "started"); err != nil {
+		t.Fatalf("RecordAudit FLOW_RUN: %v", err)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	m.Update(m.refreshCmd()())
+	auditView := m.View()
+	if !strings.Contains(auditView, "User Activity & Audit Log") || !strings.Contains(auditView, "FLOW_RUN") || !strings.Contains(auditView, "LOGIN") {
+		t.Fatalf("expected Audit tab view with recorded actions, got:\n%s", auditView)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}}) // LOGIN filter
+	m.Update(m.refreshCmd()())
+	filteredAudit := m.View()
+	if !strings.Contains(filteredAudit, "Filter: LOGIN") || !strings.Contains(filteredAudit, "admin") || strings.Contains(filteredAudit, "FLOW_RUN") {
+		t.Fatalf("expected LOGIN-filtered audit view, got:\n%s", filteredAudit)
+	}
 }

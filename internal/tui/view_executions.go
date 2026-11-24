@@ -196,11 +196,16 @@ func (m *Model) renderExecutionDetail() string {
 		parentHint = "  " + styleKeyHint.Render(fmt.Sprintf("Parent: #%s (%s) [p]", rec.ParentRunID.String, rec.ParentTaskID.String))
 	}
 
+	byHint := ""
+	if rec.TriggeredBy.Valid && rec.TriggeredBy.String != "" {
+		byHint = " · by=" + rec.TriggeredBy.String
+	}
+
 	head := fmt.Sprintf("%s  #%s  %s  %s%s",
 		styleSectionTitle.Render(rec.WorkflowName),
 		rec.ID,
 		renderStatusBadge(rec.Status),
-		styleMuted.Render("dur="+dur+" · started="+format.Timestamp(rec.CreatedAt)),
+		styleMuted.Render("dur="+dur+byHint+" · started="+format.Timestamp(rec.CreatedAt)),
 		parentHint,
 	)
 

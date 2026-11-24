@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"sort"
@@ -30,7 +29,8 @@ type dashboardViewData struct {
 	RecentRuns  []runRowView
 }
 
-func (s *Server) buildDashboardData(ctx context.Context) (dashboardViewData, error) {
+func (s *Server) buildDashboardData(r *http.Request) (dashboardViewData, error) {
+	ctx := r.Context()
 	stats, err := s.store.GetRunStats(ctx)
 	if err != nil {
 		return dashboardViewData{}, err
@@ -87,7 +87,7 @@ func (s *Server) buildDashboardData(ctx context.Context) (dashboardViewData, err
 	}
 
 	return dashboardViewData{
-		basePageData: s.newBaseData("Dashboard", "dashboard", stats.Running),
+		basePageData: s.newBaseData(r, "Dashboard", "dashboard", stats.Running),
 		Stats:        stats,
 		SuccessRate:  successRate,
 		FlowCount:    validFlows,
@@ -97,7 +97,7 @@ func (s *Server) buildDashboardData(ctx context.Context) (dashboardViewData, err
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	data, err := s.buildDashboardData(r.Context())
+	data, err := s.buildDashboardData(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -106,7 +106,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDashboardPartial(w http.ResponseWriter, r *http.Request) {
-	data, err := s.buildDashboardData(r.Context())
+	data, err := s.buildDashboardData(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

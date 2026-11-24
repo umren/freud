@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"freud/internal/auth"
 	"freud/internal/config"
 	"freud/internal/db"
 	"freud/internal/engine"
@@ -66,6 +67,7 @@ type cliFlagBindings struct {
 	noCache       bool
 	port          int
 	scheduler     bool
+	noAuth        bool
 }
 
 func registerCommonFlags(fs *flag.FlagSet, b *cliFlagBindings) {
@@ -82,6 +84,7 @@ func registerDreamFlags(fs *flag.FlagSet, b *cliFlagBindings) {
 	registerCommonFlags(fs, b)
 	fs.IntVar(&b.port, "port", config.DefaultDreamPort, "HTTP port to serve the Freud web UI")
 	fs.BoolVar(&b.scheduler, "scheduler", false, "Enable background cron execution for scheduled flows")
+	fs.BoolVar(&b.noAuth, "no-auth", false, "Disable Dream Web UI authentication")
 }
 
 func registerTUIFlags(fs *flag.FlagSet, b *cliFlagBindings) {
@@ -111,6 +114,8 @@ func (b *cliFlagBindings) toOverrides(fs *flag.FlagSet) config.Overrides {
 			ov.DreamPort = &b.port
 		case "scheduler":
 			ov.Scheduler = &b.scheduler
+		case "no-auth":
+			ov.NoAuth = &b.noAuth
 		}
 	})
 	return ov
@@ -239,8 +244,13 @@ func runWorkflowCmd(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	runID, err := rt.eng.Run(ctx, wf)
+	actor := auth.LocalActor()
+	runCtx := engine.WithTriggeredBy(ctx, actor)
+	runID, err := rt.eng.Run(runCtx, wf)
 	rt.eng.Wait()
+	if runID != "" {
+		_ = rt.store.RecordAudit(context.Background(), actor, "FLOW_RUN", wf.Name, "cli", "run_id="+runID)
+	}
 	if err != nil {
 		if runID != "" {
 			return fmt.Errorf("workflow run %s failed: %w", runID, err)
@@ -278,12 +288,27 @@ func runDreamCmd(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	enableAuth := !cfg.Dream.NoAuth
+	if enableAuth {
+		if created, err := auth.EnsureAdminFromEnv(ctx, rt.store, os.Getenv("FREUD_ADMIN_PASSWORD")); err != nil {
+			return err
+		} else if created {
+			fmt.Printf("%s Initialized admin user from %s\n", term.Tag(c, "dream"), term.Key(c, "FREUD_ADMIN_PASSWORD"))
+		} else if hasAdmin, err := rt.store.HasAdmin(ctx); err == nil && !hasAdmin {
+			fmt.Printf("%s First-time setup: open %s to set the admin password\n",
+				term.Tag(c, "dream"),
+				term.Key(c, fmt.Sprintf("http://localhost:%d/setup", cfg.Dream.Port)),
+			)
+		}
+	}
+
 	addr := fmt.Sprintf(":%d", cfg.Dream.Port)
 	uiServer, err := ui.NewServer(rt.store, ui.Config{
 		Addr:        addr,
 		FlowsDir:    cfg.FlowsDir,
 		IncludesDir: cfg.IncludesDir,
 		SchedulerOn: cfg.Dream.Scheduler,
+		EnableAuth:  enableAuth,
 		Runner:      rt.eng,
 		RunCtx:      ctx,
 	})
@@ -451,7 +476,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, term.Bold(c, "Usage:"))
 	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--no-cache] <workflow.yaml>\n", term.Key(c, "freud run"))
 	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--scheduler] [--no-cache]\n", term.Key(c, "freud tui"))
-	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--port 4321] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--scheduler] [--no-cache]\n", term.Key(c, "freud dream"))
+	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--port 4321] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--scheduler] [--no-auth] [--no-cache]\n", term.Key(c, "freud dream"))
 	fmt.Fprintf(os.Stderr, "  %s\n", term.Key(c, "freud cache ls"))
 	fmt.Fprintf(os.Stderr, "  %s\n", term.Key(c, "freud cache clear"))
 }

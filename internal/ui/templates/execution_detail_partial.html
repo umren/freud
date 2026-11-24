@@ -8,6 +8,9 @@
       Started: <span class="mono">{{.Run.StartedAt}}</span>
       · Finished: <span class="mono">{{.Run.FinishedAt}}</span>
       · Duration: <span class="mono">{{.Run.Duration}}</span>
+      {{if .Run.TriggeredBy}}
+        · By: <span class="mono">{{.Run.TriggeredBy}}</span>
+      {{end}}
       {{if .Run.ParentRunID}}
         · Parent: <a class="mono" href="/executions/{{.Run.ParentRunID}}">#{{.Run.ParentRunID}}</a> ({{.Run.ParentTaskID}})
       {{end}}

@@ -2,10 +2,12 @@ package db
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStoreLifecycleAndPragmas(t *testing.T) {
@@ -315,5 +317,88 @@ func TestMySQLStoreIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Re-open mysql/mariadb failed: %v", err)
 	}
-	_ = store2.Close()
+	if err := store2.Close(); err != nil {
+		t.Fatalf("close store2: %v", err)
+	}
+}
+
+func TestStoreUsersSessionsAndAudit(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "users.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	runStoreUsersAndAuditChecks(t, store)
+}
+
+func runStoreUsersAndAuditChecks(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	hasAdmin, err := store.HasAdmin(ctx)
+	if err != nil || hasAdmin {
+		t.Fatalf("expected no admin initially, hasAdmin=%v err=%v", hasAdmin, err)
+	}
+
+	if _, err := store.CreateUser(ctx, "admin", "hash-admin", true); err != nil {
+		t.Fatalf("CreateUser admin: %v", err)
+	}
+	if _, err := store.CreateUser(ctx, "admin", "hash-dup", false); !errors.Is(err, ErrUserExists) {
+		t.Fatalf("expected ErrUserExists on duplicate, got %v", err)
+	}
+	if _, err := store.CreateUser(ctx, "alice", "hash-alice", false); err != nil {
+		t.Fatalf("CreateUser alice: %v", err)
+	}
+
+	hasAdmin, err = store.HasAdmin(ctx)
+	if err != nil || !hasAdmin {
+		t.Fatalf("expected HasAdmin=true, err=%v", err)
+	}
+
+	// Cannot delete last admin; can delete regular user.
+	if err := store.DeleteUser(ctx, "admin"); !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("expected ErrLastAdmin, got %v", err)
+	}
+	if err := store.UpdateUserPassword(ctx, "alice", "hash-alice-v2"); err != nil {
+		t.Fatalf("UpdateUserPassword: %v", err)
+	}
+
+	// Sessions: valid vs expired.
+	if err := store.CreateSession(ctx, "tok-valid", "alice", time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateSession valid: %v", err)
+	}
+	if err := store.CreateSession(ctx, "tok-expired", "alice", time.Now().UTC().Add(-time.Minute)); err != nil {
+		t.Fatalf("CreateSession expired: %v", err)
+	}
+	sessUser, err := store.GetSessionUser(ctx, "tok-valid")
+	if err != nil || sessUser.Username != "alice" || sessUser.PasswordHash != "hash-alice-v2" {
+		t.Fatalf("GetSessionUser valid mismatch: %+v err=%v", sessUser, err)
+	}
+	if _, err := store.GetSessionUser(ctx, "tok-expired"); err == nil {
+		t.Fatalf("expected error for expired session")
+	}
+
+	if err := store.DeleteUser(ctx, "alice"); err != nil {
+		t.Fatalf("DeleteUser alice: %v", err)
+	}
+	if _, err := store.GetSessionUser(ctx, "tok-valid"); err == nil {
+		t.Fatalf("expected alice session deleted when alice deleted")
+	}
+
+	// Audit logs.
+	if err := store.RecordAudit(ctx, "admin", "LOGIN", "dream", "dream", "signed in"); err != nil {
+		t.Fatalf("RecordAudit 1: %v", err)
+	}
+	if err := store.RecordAudit(ctx, "admin", "FLOW_RUN", "etl-example", "dream", "run_id=123"); err != nil {
+		t.Fatalf("RecordAudit 2: %v", err)
+	}
+	logs, err := store.ListAuditLogs(ctx, 10, "")
+	if err != nil || len(logs) != 2 || logs[0].Action != "FLOW_RUN" || logs[1].Action != "LOGIN" {
+		t.Fatalf("unexpected audit logs: %+v err=%v", logs, err)
+	}
+	filtered, err := store.ListAuditLogs(ctx, 10, "LOGIN")
+	if err != nil || len(filtered) != 1 || filtered[0].Username != "admin" {
+		t.Fatalf("unexpected filtered audit logs: %+v err=%v", filtered, err)
+	}
 }

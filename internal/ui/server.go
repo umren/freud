@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"net/http"
 	"sync"
+	"time"
 
+	"freud/internal/auth"
 	"freud/internal/db"
 	"freud/internal/workflow"
 )
@@ -32,6 +34,7 @@ type Config struct {
 	FlowsDir    string
 	IncludesDir string
 	SchedulerOn bool
+	EnableAuth  bool
 	Runner      AsyncFlowRunner
 	RunCtx      context.Context
 }
@@ -42,6 +45,7 @@ type Server struct {
 	cfg       Config
 	runner    AsyncFlowRunner
 	runCtx    context.Context
+	limiter   *auth.LoginLimiter
 	wg        sync.WaitGroup
 	pages     map[string]*template.Template
 	partials  *template.Template
@@ -54,6 +58,8 @@ type basePageData struct {
 	RunningCount int
 	Addr         string
 	SchedulerOn  bool
+	AuthEnabled  bool
+	CurrentUser  *db.UserRecord
 }
 
 // NewServer initializes embedded templates, static assets, and routes.
@@ -79,6 +85,9 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 		"executions":       {"templates/layout.html", "templates/executions.html", "templates/executions_partial.html"},
 		"execution_detail": {"templates/layout.html", "templates/execution_detail.html", "templates/execution_detail_partial.html", "templates/dag_partial.html"},
 		"includes":         {"templates/layout.html", "templates/includes.html"},
+		"audit":            {"templates/layout.html", "templates/audit.html"},
+		"setup":            {"templates/auth_layout.html", "templates/setup.html"},
+		"login":            {"templates/auth_layout.html", "templates/login.html"},
 	}
 
 	pages := make(map[string]*template.Template, len(pageFiles))
@@ -111,6 +120,7 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 		cfg:       cfg,
 		runner:    cfg.Runner,
 		runCtx:    runCtx,
+		limiter:   auth.NewLoginLimiter(10, 5*time.Minute),
 		pages:     pages,
 		partials:  partials,
 		staticHnd: http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))),
@@ -121,6 +131,11 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /static/", s.staticHnd)
+	mux.HandleFunc("GET /setup", s.handleSetupGet)
+	mux.HandleFunc("POST /setup", s.handleSetupPost)
+	mux.HandleFunc("GET /login", s.handleLoginGet)
+	mux.HandleFunc("POST /login", s.handleLoginPost)
+	mux.HandleFunc("POST /logout", s.handleLogout)
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
 	mux.HandleFunc("GET /partials/dashboard", s.handleDashboardPartial)
 	mux.HandleFunc("GET /flows", s.handleFlows)
@@ -132,7 +147,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /executions/{id}/kill", s.handleKillExecution)
 	mux.HandleFunc("GET /partials/executions/{id}", s.handleExecutionDetailPartial)
 	mux.HandleFunc("GET /includes", s.handleIncludes)
-	return mux
+	mux.HandleFunc("GET /audit", s.handleAuditPage)
+	mux.HandleFunc("POST /users", s.handleCreateUser)
+	mux.HandleFunc("POST /users/{username}/delete", s.handleDeleteUser)
+	mux.HandleFunc("POST /account/password", s.handleChangePassword)
+	return s.authMiddleware(mux)
 }
 
 // Wait blocks until all manually triggered UI runs finish.
@@ -140,13 +159,15 @@ func (s *Server) Wait() {
 	s.wg.Wait()
 }
 
-func (s *Server) newBaseData(title, nav string, runningCount int) basePageData {
+func (s *Server) newBaseData(r *http.Request, title, nav string, runningCount int) basePageData {
 	return basePageData{
 		Title:        title,
 		Nav:          nav,
 		RunningCount: runningCount,
 		Addr:         s.cfg.Addr,
 		SchedulerOn:  s.cfg.SchedulerOn,
+		AuthEnabled:  s.cfg.EnableAuth,
+		CurrentUser:  userFromRequest(r),
 	}
 }
 

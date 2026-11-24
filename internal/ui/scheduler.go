@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"freud/internal/cron"
+	"freud/internal/engine"
 	"freud/internal/term"
 	"freud/internal/workflow"
 )
@@ -150,7 +151,8 @@ func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 				term.Key(c, fmt.Sprintf("%q", wf.Name)),
 				term.Muted(c, fmt.Sprintf("(cron=%q)", wf.Cron)),
 			)
-			if _, runErr := s.runner.Run(ctx, wf); runErr != nil {
+			runCtx := engine.WithTriggeredBy(ctx, "cron")
+			if _, runErr := s.runner.Run(runCtx, wf); runErr != nil {
 				errOut := s.stderr()
 				ec := term.ColorEnabledWriter(errOut)
 				fmt.Fprintf(errOut, "%s Flow %q %s: %v\n",

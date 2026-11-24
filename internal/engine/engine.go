@@ -67,10 +67,34 @@ type activeRun struct {
 	children []string
 }
 
+type ctxKey string
+
+const triggeredByCtxKey ctxKey = "freud_triggered_by"
+
+// WithTriggeredBy attaches the initiating user/source name (e.g. "admin", "cron", "tui") to ctx.
+func WithTriggeredBy(ctx context.Context, actor string) context.Context {
+	if strings.TrimSpace(actor) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, triggeredByCtxKey, strings.TrimSpace(actor))
+}
+
+// TriggeredByFromContext extracts the initiating actor name from ctx, if any.
+func TriggeredByFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(triggeredByCtxKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
 type runOptions struct {
 	baseEnv      map[string]string
 	parentRunID  string
 	parentTaskID string
+	triggeredBy  string
 	flowStack    []string
 }
 
@@ -209,8 +233,9 @@ func (e *Engine) isKilled(runID string) bool {
 // Run executes all tasks in the workflow in topological order and persists run metadata to SQLite.
 func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error) {
 	opts := runOptions{
-		baseEnv:   e.baseEnv,
-		flowStack: []string{wf.Name},
+		baseEnv:     e.baseEnv,
+		triggeredBy: TriggeredByFromContext(ctx),
+		flowStack:   []string{wf.Name},
 	}
 	runID, hostWorkspace, orderedTasks, err := e.prepareRun(ctx, wf, opts)
 	if err != nil {
@@ -233,8 +258,9 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 // The returned channel receives the final execution error (or nil) once the run completes.
 func (e *Engine) StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error) {
 	opts := runOptions{
-		baseEnv:   e.baseEnv,
-		flowStack: []string{wf.Name},
+		baseEnv:     e.baseEnv,
+		triggeredBy: TriggeredByFromContext(ctx),
+		flowStack:   []string{wf.Name},
 	}
 	return e.startAsyncWithOptions(ctx, wf, opts)
 }
@@ -276,7 +302,7 @@ func (e *Engine) prepareRun(ctx context.Context, wf *workflow.Workflow, opts run
 	}
 
 	defJSON := marshalWorkflowSnapshot(wf)
-	if err := e.store.CreateRunWithParent(ctx, runID, wf.Name, defJSON, opts.parentRunID, opts.parentTaskID); err != nil {
+	if err := e.store.CreateRunFull(ctx, runID, wf.Name, defJSON, opts.parentRunID, opts.parentTaskID, opts.triggeredBy); err != nil {
 		return "", "", nil, fmt.Errorf("record workflow run start: %w", err)
 	}
 
@@ -480,6 +506,7 @@ func (e *Engine) executeSubflowTask(
 		baseEnv:      task.Env,
 		parentRunID:  parentRunID,
 		parentTaskID: task.ID,
+		triggeredBy:  parentOpts.triggeredBy,
 		flowStack:    nextStack,
 	}
 

@@ -51,6 +51,7 @@ type snapshot struct {
 	SelectedRun  *db.RunRecord
 	Tasks        []db.TaskRunRecord
 	ChildRuns    []db.RunRecord
+	AuditLogs    []db.AuditLogRecord
 	Err          error
 }
 
@@ -71,7 +72,7 @@ type runKilledMsg struct {
 
 type tickMsg time.Time
 
-func loadSnapshotCmd(store *db.Store, flowsDir, statusFilter, selectedRunID string) tea.Cmd {
+func loadSnapshotCmd(store *db.Store, flowsDir, statusFilter, selectedRunID, auditFilter string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -159,6 +160,10 @@ func loadSnapshotCmd(store *db.Store, flowsDir, statusFilter, selectedRunID stri
 			} else if !strings.Contains(err.Error(), "no rows") {
 				out.Err = err
 			}
+		}
+
+		if auditLogs, err := store.ListAuditLogs(ctx, 200, auditFilter); err == nil {
+			out.AuditLogs = auditLogs
 		}
 
 		return snapshotMsg{snap: out}

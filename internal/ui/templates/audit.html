@@ -1,0 +1,143 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Users &amp; Audit Log</h1>
+    <p class="page-sub">Registered accounts and activity trail across Dream UI, TUI, and CLI</p>
+  </div>
+</div>
+
+{{if .FlashMsg}}
+<div class="alert-success">{{.FlashMsg}}</div>
+{{end}}
+{{if .FlashErr}}
+<div class="alert-error">{{.FlashErr}}</div>
+{{end}}
+
+<div class="grid-2" style="margin-bottom:18px">
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Users ({{len .Users}})</h2>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Role</th>
+          <th>Created</th>
+          {{if and .AuthEnabled .CurrentUser .CurrentUser.IsAdmin}}<th></th>{{end}}
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Users}}
+        <tr>
+          <td class="mono"><strong>{{.Username}}</strong></td>
+          <td>
+            {{if .IsAdmin}}
+              <span class="badge badge-accent">admin</span>
+            {{else}}
+              <span class="badge badge-neutral">member</span>
+            {{end}}
+          </td>
+          <td class="mono muted">{{.CreatedAt}}</td>
+          {{if and $.AuthEnabled $.CurrentUser $.CurrentUser.IsAdmin}}
+          <td style="text-align:right">
+            {{if ne .Username $.CurrentUser.Username}}
+            <form method="post" action="/users/{{.Username}}/delete" style="display:inline">
+              <button type="submit" class="btn btn-danger" style="padding:3px 9px;font-size:11px">Delete</button>
+            </form>
+            {{end}}
+          </td>
+          {{end}}
+        </tr>
+        {{else}}
+        <tr><td colspan="4" class="muted">No users registered.</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Account &amp; User Management</h2>
+    </div>
+    <div class="card-body">
+      {{if and .AuthEnabled .CurrentUser .CurrentUser.IsAdmin}}
+      <h3 style="margin:0 0 10px;font-size:14px">Add User</h3>
+      <form method="post" action="/users" class="auth-form" style="margin-bottom:20px">
+        <div class="toolbar">
+          <input class="input" type="text" name="username" placeholder="Username" required>
+          <input class="input" type="password" name="password" placeholder="Password (min 6)" required>
+          <label class="muted" style="font-size:12px;display:inline-flex;align-items:center;gap:5px">
+            <input type="checkbox" name="is_admin" value="1"> Admin
+          </label>
+          <button type="submit" class="btn btn-primary">Create User</button>
+        </div>
+      </form>
+      {{end}}
+
+      {{if and .AuthEnabled .CurrentUser}}
+      <h3 style="margin:0 0 10px;font-size:14px">Change Your Password (<span class="mono">{{.CurrentUser.Username}}</span>)</h3>
+      <form method="post" action="/account/password" class="auth-form">
+        <div class="toolbar">
+          <input class="input" type="password" name="current_password" placeholder="Current password" required>
+          <input class="input" type="password" name="new_password" placeholder="New password (min 6)" required>
+          <button type="submit" class="btn">Update Password</button>
+        </div>
+      </form>
+      {{else}}
+      <div class="muted">Authentication is disabled for this Dream UI session.</div>
+      {{end}}
+    </div>
+  </section>
+</div>
+
+<section class="card" x-data="{ query: '' }">
+  <div class="card-head">
+    <h2 class="card-title">Audit Log ({{len .AuditLogs}})</h2>
+    <div class="toolbar">
+      <input class="input" type="search" placeholder="Filter user, target, details..." x-model="query">
+      <form method="get" action="/audit" style="display:inline">
+        <select class="select" name="action" onchange="this.form.submit()">
+          <option value="">All actions</option>
+          <option value="SETUP_ADMIN" {{if eq .ActionFilter "SETUP_ADMIN"}}selected{{end}}>SETUP_ADMIN</option>
+          <option value="LOGIN" {{if eq .ActionFilter "LOGIN"}}selected{{end}}>LOGIN</option>
+          <option value="LOGOUT" {{if eq .ActionFilter "LOGOUT"}}selected{{end}}>LOGOUT</option>
+          <option value="FLOW_RUN" {{if eq .ActionFilter "FLOW_RUN"}}selected{{end}}>FLOW_RUN</option>
+          <option value="FLOW_KILL" {{if eq .ActionFilter "FLOW_KILL"}}selected{{end}}>FLOW_KILL</option>
+          <option value="USER_CREATED" {{if eq .ActionFilter "USER_CREATED"}}selected{{end}}>USER_CREATED</option>
+          <option value="USER_DELETED" {{if eq .ActionFilter "USER_DELETED"}}selected{{end}}>USER_DELETED</option>
+          <option value="PASSWORD_CHANGED" {{if eq .ActionFilter "PASSWORD_CHANGED"}}selected{{end}}>PASSWORD_CHANGED</option>
+        </select>
+      </form>
+    </div>
+  </div>
+  {{if .AuditLogs}}
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>User</th>
+        <th>Action</th>
+        <th>Target</th>
+        <th>Source</th>
+        <th>Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .AuditLogs}}
+      <tr x-show="query === '' || '{{.SearchKey}}'.includes(query.toLowerCase())">
+        <td class="mono muted">{{.CreatedAt}}</td>
+        <td class="mono"><strong>{{.Username}}</strong></td>
+        <td><span class="badge badge-{{.ActionSlug}}">{{.Action}}</span></td>
+        <td class="mono">{{if .Target}}{{.Target}}{{else}}—{{end}}</td>
+        <td><span class="badge badge-neutral mono">{{.Source}}</span></td>
+        <td class="mono muted">{{if .Details}}{{.Details}}{{else}}—{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty">No user activity recorded yet.</div>
+  {{end}}
+</section>
+{{end}}

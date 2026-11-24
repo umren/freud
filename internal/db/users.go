@@ -1,0 +1,251 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+var (
+	// ErrUserExists is returned when attempting to create a duplicate username.
+	ErrUserExists = errors.New("user already exists")
+	// ErrLastAdmin is returned when attempting to delete the sole administrator account.
+	ErrLastAdmin = errors.New("cannot delete the last admin account")
+)
+
+// UserRecord represents a row in the users table.
+type UserRecord struct {
+	ID           int64
+	Username     string
+	PasswordHash string
+	IsAdmin      bool
+	CreatedAt    string
+}
+
+// AuditLogRecord represents a row in the audit_logs table.
+type AuditLogRecord struct {
+	ID        int64
+	Username  string
+	Action    string
+	Target    sql.NullString
+	Source    string
+	Details   sql.NullString
+	CreatedAt string
+}
+
+// HasAdmin reports whether at least one admin account exists.
+func (s *Store) HasAdmin(ctx context.Context) (bool, error) {
+	var cnt int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE is_admin = 1`).Scan(&cnt); err != nil {
+		return false, fmt.Errorf("count admin users: %w", err)
+	}
+	return cnt > 0, nil
+}
+
+// CountUsers returns the total number of registered users.
+func (s *Store) CountUsers(ctx context.Context) (int, error) {
+	var cnt int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&cnt); err != nil {
+		return 0, fmt.Errorf("count users: %w", err)
+	}
+	return cnt, nil
+}
+
+// CreateUser inserts a new user account.
+func (s *Store) CreateUser(ctx context.Context, username, passwordHash string, isAdmin bool) (*UserRecord, error) {
+	username = strings.TrimSpace(username)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	adminFlag := 0
+	if isAdmin {
+		adminFlag = 1
+	}
+
+	_, err := s.db.ExecContext(
+		ctx,
+		s.rebind(`INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)`),
+		username, passwordHash, adminFlag, now,
+	)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "unique") || strings.Contains(lower, "duplicate") {
+			return nil, fmt.Errorf("%w: %s", ErrUserExists, username)
+		}
+		return nil, fmt.Errorf("insert user %q: %w", username, err)
+	}
+	return s.GetUserByUsername(ctx, username)
+}
+
+// GetUserByUsername fetches a single user record by username.
+func (s *Store) GetUserByUsername(ctx context.Context, username string) (*UserRecord, error) {
+	var rec UserRecord
+	var isAdmin int
+	err := s.db.QueryRowContext(
+		ctx,
+		s.rebind(`SELECT id, username, password_hash, is_admin, created_at FROM users WHERE username = ?`),
+		strings.TrimSpace(username),
+	).Scan(&rec.ID, &rec.Username, &rec.PasswordHash, &isAdmin, &rec.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get user %q: %w", username, err)
+	}
+	rec.IsAdmin = isAdmin != 0
+	return &rec, nil
+}
+
+// ListUsers returns all users ordered alphabetically by username (admins first).
+func (s *Store) ListUsers(ctx context.Context) ([]UserRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, username, password_hash, is_admin, created_at FROM users ORDER BY is_admin DESC, username ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []UserRecord
+	for rows.Next() {
+		var rec UserRecord
+		var isAdmin int
+		if err := rows.Scan(&rec.ID, &rec.Username, &rec.PasswordHash, &isAdmin, &rec.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan user: %w", err)
+		}
+		rec.IsAdmin = isAdmin != 0
+		users = append(users, rec)
+	}
+	return users, rows.Err()
+}
+
+// UpdateUserPassword replaces the password hash for the named user.
+func (s *Store) UpdateUserPassword(ctx context.Context, username, passwordHash string) error {
+	res, err := s.db.ExecContext(
+		ctx,
+		s.rebind(`UPDATE users SET password_hash = ? WHERE username = ?`),
+		passwordHash, strings.TrimSpace(username),
+	)
+	if err != nil {
+		return fmt.Errorf("update password for %q: %w", username, err)
+	}
+	rows, err := res.RowsAffected()
+	if err == nil && rows == 0 {
+		return fmt.Errorf("user %q not found", username)
+	}
+	return nil
+}
+
+// DeleteUser removes a user account and clears its sessions, refusing to delete the last admin.
+func (s *Store) DeleteUser(ctx context.Context, username string) error {
+	username = strings.TrimSpace(username)
+	u, err := s.GetUserByUsername(ctx, username)
+	if err != nil {
+		return err
+	}
+	if u.IsAdmin {
+		var adminCount int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE is_admin = 1`).Scan(&adminCount); err != nil {
+			return fmt.Errorf("count admins: %w", err)
+		}
+		if adminCount <= 1 {
+			return ErrLastAdmin
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM sessions WHERE username = ?`), username); err != nil {
+		return fmt.Errorf("delete user sessions %q: %w", username, err)
+	}
+	if _, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM users WHERE username = ?`), username); err != nil {
+		return fmt.Errorf("delete user %q: %w", username, err)
+	}
+	return nil
+}
+
+// CreateSession stores a persistent HTTP session token for username.
+func (s *Store) CreateSession(ctx context.Context, token, username string, expiresAt time.Time) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	exp := expiresAt.UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(
+		ctx,
+		s.rebind(`INSERT INTO sessions (token, username, expires_at, created_at) VALUES (?, ?, ?, ?)`),
+		token, username, exp, now,
+	)
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	return nil
+}
+
+// GetSessionUser resolves an active (unexpired) session token to its UserRecord.
+func (s *Store) GetSessionUser(ctx context.Context, token string) (*UserRecord, error) {
+	var username, expiresRaw string
+	err := s.db.QueryRowContext(
+		ctx,
+		s.rebind(`SELECT username, expires_at FROM sessions WHERE token = ?`),
+		token,
+	).Scan(&username, &expiresRaw)
+	if err != nil {
+		return nil, fmt.Errorf("get session: %w", err)
+	}
+
+	expiresAt, parseErr := time.Parse(time.RFC3339Nano, expiresRaw)
+	if parseErr != nil || time.Now().UTC().After(expiresAt) {
+		_ = s.DeleteSession(ctx, token)
+		return nil, fmt.Errorf("session expired")
+	}
+
+	return s.GetUserByUsername(ctx, username)
+}
+
+// DeleteSession invalidates a session token.
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM sessions WHERE token = ?`), token)
+	return err
+}
+
+// RecordAudit writes an entry to audit_logs capturing who performed an action, where, and on what target.
+func (s *Store) RecordAudit(ctx context.Context, username, action, target, source, details string) error {
+	if strings.TrimSpace(username) == "" {
+		username = "system"
+	}
+	if strings.TrimSpace(source) == "" {
+		source = "system"
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(
+		ctx,
+		s.rebind(`INSERT INTO audit_logs (username, action, target, source, details, created_at) VALUES (?, ?, ?, ?, ?, ?)`),
+		username, strings.ToUpper(strings.TrimSpace(action)), nullString(target), source, nullString(details), now,
+	)
+	if err != nil {
+		return fmt.Errorf("record audit log: %w", err)
+	}
+	return nil
+}
+
+// ListAuditLogs returns audit log entries ordered from newest to oldest, optionally filtered by action.
+func (s *Store) ListAuditLogs(ctx context.Context, limit int, actionFilter string) ([]AuditLogRecord, error) {
+	query := `SELECT id, username, action, target, source, details, created_at FROM audit_logs`
+	var args []any
+	if actionFilter = strings.ToUpper(strings.TrimSpace(actionFilter)); actionFilter != "" {
+		query += ` WHERE action = ?`
+		args = append(args, actionFilter)
+	}
+	query += ` ORDER BY id DESC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list audit logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []AuditLogRecord
+	for rows.Next() {
+		var rec AuditLogRecord
+		if err := rows.Scan(&rec.ID, &rec.Username, &rec.Action, &rec.Target, &rec.Source, &rec.Details, &rec.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan audit log: %w", err)
+		}
+		logs = append(logs, rec)
+	}
+	return logs, rows.Err()
+}

@@ -46,6 +46,9 @@
         <a href="/includes" class="nav-link {{if eq .Nav "includes"}}active{{end}}">
           <span>Includes</span>
         </a>
+        <a href="/audit" class="nav-link {{if eq .Nav "audit"}}active{{end}}">
+          <span>Users &amp; Audit</span>
+        </a>
       </nav>
 
       <div class="sidebar-foot"
@@ -57,6 +60,17 @@
                try { localStorage.setItem('freud-theme', this.theme); } catch (e) {}
              }
            }">
+        {{if and .AuthEnabled .CurrentUser}}
+        <div class="sidebar-user">
+          <div>
+            <span class="mono"><strong>{{.CurrentUser.Username}}</strong></span>
+            {{if .CurrentUser.IsAdmin}}<span class="badge badge-accent" style="margin-left:4px">admin</span>{{end}}
+          </div>
+          <form method="post" action="/logout" style="margin:0">
+            <button type="submit" class="btn" style="padding:3px 8px;font-size:11px">Logout</button>
+          </form>
+        </div>
+        {{end}}
         <button type="button" class="theme-btn" @click="toggle()">
           <span>Theme</span>
           <span class="mono" x-text="theme === 'dark' ? 'Dark' : 'Light'"></span>

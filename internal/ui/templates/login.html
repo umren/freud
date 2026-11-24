@@ -1,0 +1,20 @@
+{{define "auth_content"}}
+<h1 class="page-title" style="font-size:19px;margin-bottom:6px">Sign In</h1>
+<p class="page-sub" style="margin-top:0;margin-bottom:18px">Sign in with your Freud account to manage flows and inspect runs.</p>
+
+{{if .Error}}
+<div class="alert-error">{{.Error}}</div>
+{{end}}
+
+<form method="post" action="/login" class="auth-form">
+  <label class="auth-label">
+    <span>Username</span>
+    <input class="input" type="text" name="username" value="{{.Username}}" required autocomplete="username" autofocus>
+  </label>
+  <label class="auth-label">
+    <span>Password</span>
+    <input class="input" type="password" name="password" required autocomplete="current-password">
+  </label>
+  <button type="submit" class="btn btn-primary" style="width:100%;padding:9px 14px;margin-top:4px">Sign In</button>
+</form>
+{{end}}

@@ -73,7 +73,7 @@ Optionally pass a custom `.env` file or force-rebuild cached dependency images:
 ./freud run --no-cache flows/etl-example.yaml
 ```
 
-Start the interactive terminal UI (Dashboard, Flows + YAML viewer, live Executions/Logs, Run & Kill):
+Start the interactive terminal UI (Dashboard, Flows + YAML viewer, live Executions/Logs, Audit Log, Run & Kill — passwordless local access, actions recorded as `local`):
 
 ```bash
 ./freud tui
@@ -81,19 +81,24 @@ Start the interactive terminal UI (Dashboard, Flows + YAML viewer, live Executio
 ./freud tui --flows-dir flows --scheduler
 ```
 
-Start the embedded Web UI (default port `4321`):
+Start the embedded Web UI (default port `4321`, authentication enabled by default):
 
 ```bash
 ./freud dream
 # Optional flags:
 ./freud dream --port 4321 --flows-dir flows --includes-dir includes --scheduler
+# Optional local mode without login/auth:
+./freud dream --no-auth
 ```
 
-The Web UI exposes four pages (no auth required locally):
+On the very first launch of `./freud dream` (when no admin user exists yet), opening the UI automatically redirects to **`/setup`** in your browser to create the initial `admin` account and password (at least 8 characters). Alternatively, set `FREUD_ADMIN_PASSWORD` to provision the initial admin non-interactively on startup.
+
+The Web UI exposes five pages:
 - **Dashboard (`/`)**: execution counts, success rate, upcoming cron runs, and recent executions (auto-refreshes via HTMX).
 - **Flows (`/flows`)**: workflows discovered in `flows/`, cron schedules, SVG task topology, read-only YAML source viewer, and a **Run Now** button to trigger the flow immediately and jump to its live execution page.
-- **Executions (`/executions`)**: newest-to-oldest execution history with status filter, search, real-time streaming task logs, Gantt timeline, and execution topology.
+- **Executions (`/executions`)**: newest-to-oldest execution history with status filter, search, who triggered each run, real-time streaming task logs, Gantt timeline, and execution topology.
 - **Includes (`/includes`)**: read-only file browser for `includes/`.
+- **Users & Audit (`/audit`)**: searchable activity audit log (`SETUP_ADMIN`, `LOGIN`, `LOGOUT`, `FLOW_RUN`, `FLOW_KILL`, `USER_CREATED`, `USER_DELETED`, `PASSWORD_CHANGED`), password self-service, and admin user management (all users share the same flow permissions; admins can additionally add/remove users).
 
 Manage cached dependency images:
 
@@ -107,8 +112,8 @@ Manage cached dependency images:
 Everything works out of the box with zero configuration (`orchestrator.db`, `workspaces/`, `flows/`, `includes/` in the current directory).
 When you want custom locations, Freud loads settings with the following precedence (highest wins):
 
-1. **CLI flags**: `--config`, `--db`, `--flows-dir`, `--includes-dir`, `--workspaces-dir`, `--env-file`, `--no-cache`, `--port`, `--scheduler`
-2. **Environment variables**: `FREUD_CONFIG`, `FREUD_DB`, `FREUD_FLOWS_DIR`, `FREUD_INCLUDES_DIR`, `FREUD_WORKSPACES_DIR`, `FREUD_ENV_FILE`, `FREUD_NO_CACHE`, `FREUD_PORT`, `FREUD_SCHEDULER`
+1. **CLI flags**: `--config`, `--db`, `--flows-dir`, `--includes-dir`, `--workspaces-dir`, `--env-file`, `--no-cache`, `--port`, `--scheduler`, `--no-auth`
+2. **Environment variables**: `FREUD_CONFIG`, `FREUD_DB`, `FREUD_FLOWS_DIR`, `FREUD_INCLUDES_DIR`, `FREUD_WORKSPACES_DIR`, `FREUD_ENV_FILE`, `FREUD_NO_CACHE`, `FREUD_PORT`, `FREUD_SCHEDULER`, `FREUD_NO_AUTH`, `FREUD_ADMIN_PASSWORD`
 3. **Optional `freud.toml`** in the current directory (or via `--config <path>`):
 
 ```toml
@@ -122,6 +127,7 @@ no_cache = false
 [dream]
 port = 4321
 scheduler = true
+no_auth = false
 
 [tui]
 scheduler = false
@@ -244,8 +250,11 @@ Notes:
 - **SQLite** uses `PRAGMA journal_mode=WAL;`, `PRAGMA busy_timeout=5000;`, and `PRAGMA foreign_keys=ON;`; parent directories for relative/custom `.db` file paths are created automatically.
 - **MySQL / MariaDB** connections enforce `utf8mb4` (`LONGTEXT` for `logs` and `definition_json`) and `clientFoundRows=true`.
 - Schema tables created automatically:
-  - **`runs`**: `id`, `workflow_name`, `status` (`RUNNING`, `SUCCESS`, `FAILED`, `KILLED`), `created_at`, `finished_at`, `definition_json`, `parent_run_id`, `parent_task_id`
+  - **`runs`**: `id`, `workflow_name`, `status` (`RUNNING`, `SUCCESS`, `FAILED`, `KILLED`), `created_at`, `finished_at`, `definition_json`, `parent_run_id`, `parent_task_id`, `triggered_by`
   - **`task_runs`**: `id`, `run_id`, `task_id`, `status`, `exit_code`, `logs`, `started_at`, `finished_at`, `runtime`, `image`
+  - **`users`**: `id`, `username`, `password_hash`, `is_admin`, `created_at`
+  - **`sessions`**: `token`, `username`, `expires_at`, `created_at`
+  - **`audit_logs`**: `id`, `username`, `action`, `target`, `source`, `details`, `created_at`
 
 Example launching Dream UI or running a flow against PostgreSQL or MariaDB:
 

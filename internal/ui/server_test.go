@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,5 +302,180 @@ func TestUIKillExecution(t *testing.T) {
 	h.ServeHTTP(missingRec, missingReq)
 	if missingRec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown run kill, got %d", missingRec.Code)
+	}
+}
+
+func TestUIAuthSetupLoginUsersAndAudit(t *testing.T) {
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	includesDir := filepath.Join(tmp, "includes")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(includesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := db.Open(filepath.Join(tmp, "auth.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer store.Close()
+
+	kr := &mockKillRunner{store: store}
+	srv, err := NewServer(store, Config{
+		Addr:        ":4321",
+		FlowsDir:    flowsDir,
+		IncludesDir: includesDir,
+		Runner:      kr,
+		EnableAuth:  true,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	h := srv.Handler()
+
+	// 1. Before an admin exists, GET / redirects to /setup.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/setup" {
+		t.Fatalf("expected 303 -> /setup, got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// 2. Complete initial setup at POST /setup -> creates admin and sets session cookie.
+	setupForm := url.Values{
+		"username":         {"admin"},
+		"password":         {"supersecret12"},
+		"confirm_password": {"supersecret12"},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/setup", strings.NewReader(setupForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
+		t.Fatalf("expected 303 -> / after setup, got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	var adminCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			adminCookie = c
+			break
+		}
+	}
+	if adminCookie == nil || adminCookie.Value == "" {
+		t.Fatal("expected session cookie after setup")
+	}
+
+	// 3. Unauthenticated requests now redirect to /login.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
+		t.Fatalf("expected 303 -> /login when unauthenticated, got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// 4. Admin creates a regular user 'alice'.
+	createUserForm := url.Values{
+		"username": {"alice"},
+		"password": {"alicepass123"},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(createUserForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(adminCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(rec.Header().Get("Location"), "/audit") {
+		t.Fatalf("expected 303 -> /audit after user creation, got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// 5. Log in as alice via POST /login.
+	loginForm := url.Values{
+		"username": {"alice"},
+		"password": {"alicepass123"},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(loginForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
+		t.Fatalf("expected 303 -> / on alice login, got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	var aliceCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			aliceCookie = c
+			break
+		}
+	}
+	if aliceCookie == nil || aliceCookie.Value == "" {
+		t.Fatal("expected session cookie for alice")
+	}
+
+	// 6. Regular user cannot create users (403 Forbidden), but can view /audit and kill runs.
+	forbiddenForm := url.Values{"username": {"bob"}, "password": {"bobpass123"}}
+	req = httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(forbiddenForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(aliceCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin user creation, got %d", rec.Code)
+	}
+
+	ctx := context.Background()
+	if err := store.CreateRunFull(ctx, "run-live-1", "demo-flow", "", "", "", "alice"); err != nil {
+		t.Fatalf("CreateRunFull: %v", err)
+	}
+
+	// Alice kills the run -> recorded as FLOW_KILL in audit log.
+	req = httptest.NewRequest(http.MethodPost, "/executions/run-live-1/kill", nil)
+	req.AddCookie(aliceCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 after kill, got %d", rec.Code)
+	}
+
+	// Executions page shows TriggeredBy 'alice'.
+	req = httptest.NewRequest(http.MethodGet, "/executions", nil)
+	req.AddCookie(aliceCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "alice") {
+		t.Fatalf("expected /executions to include triggered_by alice, code=%d", rec.Code)
+	}
+
+	// /audit page shows SETUP_ADMIN, USER_CREATED, LOGIN, and FLOW_KILL events.
+	req = httptest.NewRequest(http.MethodGet, "/audit", nil)
+	req.AddCookie(adminCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /audit, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"SETUP_ADMIN", "USER_CREATED", "LOGIN", "FLOW_KILL", "alice", "admin"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected /audit page to contain %q", want)
+		}
+	}
+
+	// Logout clears session.
+	req = httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.AddCookie(aliceCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
+		t.Fatalf("expected 303 -> /login after logout, got %d", rec.Code)
+	}
+
+	// Old alice cookie is no longer valid.
+	req = httptest.NewRequest(http.MethodGet, "/flows", nil)
+	req.AddCookie(aliceCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
+		t.Fatalf("expected invalidated session to redirect to /login, got %d", rec.Code)
 	}
 }

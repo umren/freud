@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"freud/internal/cron"
+	"freud/internal/engine"
 	"freud/internal/workflow"
 )
 
@@ -110,7 +111,7 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.renderPage(w, "flows", flowsViewData{
-		basePageData: s.newBaseData("Flows", "flows", stats.Running),
+		basePageData: s.newBaseData(r, "Flows", "flows", stats.Running),
 		FlowsDir:     s.cfg.FlowsDir,
 		Flows:        rows,
 	})
@@ -185,7 +186,7 @@ func (s *Server) handleFlowDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.renderPage(w, "flow_detail", flowDetailViewData{
-		basePageData: s.newBaseData(matched.Workflow.Name, "flows", stats.Running),
+		basePageData: s.newBaseData(r, matched.Workflow.Name, "flows", stats.Running),
 		Flow: flowDetailItem{
 			Name:      matched.Workflow.Name,
 			FileName:  matched.FileName,
@@ -214,11 +215,14 @@ func (s *Server) handleRunFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runID, doneCh, err := s.runner.StartAsync(s.runCtx, matched.Workflow)
+	actor := s.actorName(r)
+	runCtx := engine.WithTriggeredBy(s.runCtx, actor)
+	runID, doneCh, err := s.runner.StartAsync(runCtx, matched.Workflow)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("start workflow %q: %v", matched.Workflow.Name, err), http.StatusInternalServerError)
 		return
 	}
+	_ = s.store.RecordAudit(r.Context(), actor, "FLOW_RUN", matched.Workflow.Name, "dream", "run_id="+runID)
 
 	s.wg.Add(1)
 	go func(name, id string, ch <-chan error) {
