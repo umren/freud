@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"freud/internal/db"
 )
 
 const (
@@ -171,7 +173,7 @@ func applyTOMLFile(cfg *Config, path string) error {
 		if p == "" {
 			return ""
 		}
-		if skipSpecial && (p == ":memory:" || strings.HasPrefix(p, "file:")) {
+		if skipSpecial && (p == ":memory:" || strings.HasPrefix(p, "file:") || db.DetectDialect(p) == db.DialectPostgres) {
 			return p
 		}
 		if filepath.IsAbs(p) {

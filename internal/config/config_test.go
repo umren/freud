@@ -108,4 +108,17 @@ func TestLoadValidationErrors(t *testing.T) {
 	if _, err := Load(Overrides{DreamPort: &badPort}); err == nil || !strings.Contains(err.Error(), "invalid port") {
 		t.Fatalf("expected invalid port error, got %v", err)
 	}
+
+	dsnTOML := filepath.Join(tmp, "pg.toml")
+	dsn := "postgres://freud:secret@localhost:5432/freud?sslmode=disable"
+	if err := os.WriteFile(dsnTOML, []byte("db = \""+dsn+"\"\n"), 0o644); err != nil {
+		t.Fatalf("write pg.toml: %v", err)
+	}
+	cfg, err := Load(Overrides{ConfigPath: dsnTOML})
+	if err != nil {
+		t.Fatalf("Load pg.toml: %v", err)
+	}
+	if cfg.DB != dsn {
+		t.Fatalf("expected postgres DSN preserved verbatim, got %q", cfg.DB)
+	}
 }

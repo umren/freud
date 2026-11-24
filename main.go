@@ -70,7 +70,7 @@ type cliFlagBindings struct {
 
 func registerCommonFlags(fs *flag.FlagSet, b *cliFlagBindings) {
 	fs.StringVar(&b.configPath, "config", "", "Optional path to freud.toml configuration file")
-	fs.StringVar(&b.dbPath, "db", config.DefaultDBPath, "Path to SQLite database file")
+	fs.StringVar(&b.dbPath, "db", config.DefaultDBPath, "SQLite file path or PostgreSQL DSN (postgres://...)")
 	fs.StringVar(&b.workspacesDir, "workspaces-dir", config.DefaultWorkspacesDir, "Directory for task execution workspaces")
 	fs.StringVar(&b.flowsDir, "flows-dir", config.DefaultFlowsDir, "Directory containing workflow YAML files")
 	fs.StringVar(&b.includesDir, "includes-dir", config.DefaultIncludesDir, "Directory containing shared include files")
@@ -125,7 +125,7 @@ type runtimeStack struct {
 }
 
 func openRuntime(cfg config.Config, workflowPath string, silent bool) (*runtimeStack, error) {
-	if cfg.DB != ":memory:" && !strings.HasPrefix(cfg.DB, "file:") {
+	if db.DetectDialect(cfg.DB) == db.DialectSQLite && cfg.DB != ":memory:" && !strings.HasPrefix(cfg.DB, "file:") {
 		if dir := filepath.Dir(cfg.DB); dir != "" && dir != "." {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return nil, fmt.Errorf("create database directory %q: %w", dir, err)

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -177,5 +178,91 @@ func TestStoreParentChildRunsAndKilledStats(t *testing.T) {
 	}
 	if stats.Total != 2 || stats.Killed != 2 {
 		t.Fatalf("expected Total=2 Killed=2, got %+v", stats)
+	}
+}
+
+func TestDetectDialectAndRebind(t *testing.T) {
+	if got := DetectDialect("orchestrator.db"); got != DialectSQLite {
+		t.Fatalf("expected sqlite for filename, got %s", got)
+	}
+	if got := DetectDialect(":memory:"); got != DialectSQLite {
+		t.Fatalf("expected sqlite for :memory:, got %s", got)
+	}
+	if got := DetectDialect("postgres://user:pass@localhost:5432/freud?sslmode=disable"); got != DialectPostgres {
+		t.Fatalf("expected postgres for postgres://, got %s", got)
+	}
+	if got := DetectDialect("POSTGRESQL://localhost/freud"); got != DialectPostgres {
+		t.Fatalf("expected postgres for POSTGRESQL://, got %s", got)
+	}
+
+	got := rebindPostgres("SELECT * FROM runs WHERE status = '?' AND workflow_name = ? LIMIT ?")
+	want := "SELECT * FROM runs WHERE status = '?' AND workflow_name = $1 LIMIT $2"
+	if got != want {
+		t.Fatalf("rebindPostgres mismatch:\ngot:  %s\nwant: %s", got, want)
+	}
+}
+
+func TestPostgresStoreIntegration(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("FREUD_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("FREUD_TEST_POSTGRES_DSN not set")
+	}
+
+	store, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("Open postgres failed: %v", err)
+	}
+	defer store.Close()
+
+	if store.Dialect() != DialectPostgres {
+		t.Fatalf("expected DialectPostgres, got %s", store.Dialect())
+	}
+
+	ctx := context.Background()
+	_, _ = store.db.ExecContext(ctx, "TRUNCATE TABLE task_runs, runs RESTART IDENTITY CASCADE")
+
+	if err := store.CreateRunWithParent(ctx, "pg-parent", "pg-main", `{"name":"pg-main"}`, "", ""); err != nil {
+		t.Fatalf("CreateRunWithParent: %v", err)
+	}
+	trID, err := store.CreateTaskRunWithMeta(ctx, "pg-parent", "step1", "python", "python:3.13-slim")
+	if err != nil || trID <= 0 {
+		t.Fatalf("CreateTaskRunWithMeta: id=%d err=%v", trID, err)
+	}
+	if err := store.UpdateTaskRunLogs(ctx, trID, "pg log line 1\n"); err != nil {
+		t.Fatalf("UpdateTaskRunLogs: %v", err)
+	}
+	if err := store.FinishTaskRun(ctx, trID, StatusSuccess, 0, "pg log line 1\ndone\n"); err != nil {
+		t.Fatalf("FinishTaskRun: %v", err)
+	}
+
+	if err := store.CreateRunWithParent(ctx, "pg-child", "pg-sub", "", "pg-parent", "step1"); err != nil {
+		t.Fatalf("CreateRunWithParent child: %v", err)
+	}
+	if err := store.FinishRun(ctx, "pg-child", StatusSuccess); err != nil {
+		t.Fatalf("FinishRun child: %v", err)
+	}
+	if err := store.FinishRun(ctx, "pg-parent", StatusSuccess); err != nil {
+		t.Fatalf("FinishRun parent: %v", err)
+	}
+
+	rec, err := store.GetRun(ctx, "pg-parent")
+	if err != nil || rec.Status != StatusSuccess {
+		t.Fatalf("GetRun: %+v err=%v", rec, err)
+	}
+	children, err := store.ListChildRuns(ctx, "pg-parent")
+	if err != nil || len(children) != 1 || children[0].ID != "pg-child" {
+		t.Fatalf("ListChildRuns: %+v err=%v", children, err)
+	}
+	tasks, err := store.ListTaskRuns(ctx, "pg-parent")
+	if err != nil || len(tasks) != 1 || tasks[0].Logs.String != "pg log line 1\ndone\n" {
+		t.Fatalf("ListTaskRuns: %+v err=%v", tasks, err)
+	}
+	stats, err := store.GetRunStats(ctx)
+	if err != nil || stats.Total != 2 || stats.Success != 2 {
+		t.Fatalf("GetRunStats: %+v err=%v", stats, err)
+	}
+	latest, err := store.GetLatestRunByWorkflow(ctx)
+	if err != nil || latest["pg-main"].ID != "pg-parent" {
+		t.Fatalf("GetLatestRunByWorkflow: %+v err=%v", latest, err)
 	}
 }
