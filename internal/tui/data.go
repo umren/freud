@@ -39,6 +39,8 @@ type upcomingSchedule struct {
 	StartsIn  string
 }
 
+const tuiPageSize = 50
+
 type snapshot struct {
 	LoadedAt     time.Time
 	Stats        db.RunStats
@@ -48,10 +50,12 @@ type snapshot struct {
 	LatestByFlow map[string]db.RunRecord
 	Upcoming     []upcomingSchedule
 	Runs         []db.RunRecord
+	RunsTotal    int
 	SelectedRun  *db.RunRecord
 	Tasks        []db.TaskRunRecord
 	ChildRuns    []db.RunRecord
 	AuditLogs    []db.AuditLogRecord
+	AuditTotal   int
 	Err          error
 }
 
@@ -72,7 +76,7 @@ type runKilledMsg struct {
 
 type tickMsg time.Time
 
-func loadSnapshotCmd(store *db.Store, flowsDir, statusFilter, selectedRunID, auditFilter string) tea.Cmd {
+func loadSnapshotCmd(store *db.Store, flowsDir, statusFilter, selectedRunID, auditFilter string, execPage, auditPage int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -138,12 +142,17 @@ func loadSnapshotCmd(store *db.Store, flowsDir, statusFilter, selectedRunID, aud
 			return out.Upcoming[i].NextRunAt.Before(out.Upcoming[j].NextRunAt)
 		})
 
-		runs, err := store.ListRuns(ctx, 200, statusFilter)
+		runs, runsTotal, err := store.ListRunsPage(ctx, db.RunQuery{
+			Status: statusFilter,
+			Limit:  tuiPageSize,
+			Offset: max(0, execPage) * tuiPageSize,
+		})
 		if err != nil {
 			out.Err = err
 			return snapshotMsg{snap: out}
 		}
 		out.Runs = runs
+		out.RunsTotal = runsTotal
 
 		if selectedRunID != "" {
 			rec, err := store.GetRun(ctx, selectedRunID)
@@ -162,8 +171,13 @@ func loadSnapshotCmd(store *db.Store, flowsDir, statusFilter, selectedRunID, aud
 			}
 		}
 
-		if auditLogs, err := store.ListAuditLogs(ctx, 200, auditFilter); err == nil {
+		if auditLogs, auditTotal, err := store.ListAuditLogsPage(ctx, db.AuditQuery{
+			Action: auditFilter,
+			Limit:  tuiPageSize,
+			Offset: max(0, auditPage) * tuiPageSize,
+		}); err == nil {
 			out.AuditLogs = auditLogs
+			out.AuditTotal = auditTotal
 		}
 
 		return snapshotMsg{snap: out}

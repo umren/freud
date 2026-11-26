@@ -78,13 +78,17 @@ tasks:
 		t.Fatalf("unexpected FlowDetail: %+v err=%v", detail, err)
 	}
 
-	// ListExecutions: status validation & clamping.
-	if _, _, err := ListExecutions(ctx, store, "BOGUS", 10, 50, 200); !errors.Is(err, ErrInvalidStatus) {
+	// ListExecutions: status validation, search, and pagination.
+	if _, err := ListExecutions(ctx, store, "BOGUS", "", 10, 0, 50, 200); !errors.Is(err, ErrInvalidStatus) {
 		t.Fatalf("expected ErrInvalidStatus, got %v", err)
 	}
-	stats, runs, err := ListExecutions(ctx, store, db.StatusSuccess, 999, 50, 10)
-	if err != nil || stats.Total != 2 || len(runs) != 2 {
-		t.Fatalf("unexpected ListExecutions: stats=%+v runs=%+v err=%v", stats, runs, err)
+	execPage, err := ListExecutions(ctx, store, db.StatusSuccess, "", 1, 0, 50, 10)
+	if err != nil || execPage.Total != 2 || len(execPage.Runs) != 1 || !execPage.HasMore {
+		t.Fatalf("unexpected ListExecutions page 1: %+v err=%v", execPage, err)
+	}
+	execPage2, err := ListExecutions(ctx, store, db.StatusSuccess, "", 1, 1, 50, 10)
+	if err != nil || execPage2.Total != 2 || len(execPage2.Runs) != 1 || execPage2.HasMore {
+		t.Fatalf("unexpected ListExecutions page 2: %+v err=%v", execPage2, err)
 	}
 
 	// GetExecutionDetail & missing run error.
@@ -97,8 +101,8 @@ tasks:
 	}
 
 	// ListAuditLogs.
-	auditLogs, err := ListAuditLogs(ctx, store, 0, 50, 200, "FLOW_RUN")
-	if err != nil || len(auditLogs) != 1 || auditLogs[0].Source != "api" {
-		t.Fatalf("unexpected AuditLogs: %+v err=%v", auditLogs, err)
+	auditPage, err := ListAuditLogs(ctx, store, 0, 0, 50, 200, "FLOW_RUN", "sample")
+	if err != nil || auditPage.Total != 1 || len(auditPage.Logs) != 1 || auditPage.Logs[0].Source != "api" || auditPage.HasMore {
+		t.Fatalf("unexpected AuditLogsPage: %+v err=%v", auditPage, err)
 	}
 }

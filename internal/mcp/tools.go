@@ -71,7 +71,7 @@ func (s *Server) registerTools() {
 
 	s.registerTool(ToolDefinition{
 		Name:        "list_executions",
-		Description: "List workflow executions ordered newest-first with aggregate status statistics.",
+		Description: "List paginated workflow executions ordered newest-first with aggregate status statistics.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -80,9 +80,17 @@ func (s *Server) registerTools() {
 					"description": "Optional status filter: RUNNING, SUCCESS, FAILED, or KILLED.",
 					"enum":        []string{"RUNNING", "SUCCESS", "FAILED", "KILLED"},
 				},
+				"q": map[string]any{
+					"type":        "string",
+					"description": "Optional substring search across run_id, workflow_name, and triggered_by.",
+				},
 				"limit": map[string]any{
 					"type":        "integer",
 					"description": "Maximum runs to return (default 20, max 100).",
+				},
+				"offset": map[string]any{
+					"type":        "integer",
+					"description": "Number of matching runs to skip for pagination (default 0).",
 				},
 			},
 		},
@@ -120,7 +128,7 @@ func (s *Server) registerTools() {
 
 	s.registerTool(ToolDefinition{
 		Name:        "list_audit_logs",
-		Description: "Inspect recent user and agent actions (FLOW_RUN, FLOW_KILL, LOGIN, TOKEN_CREATED, etc.).",
+		Description: "Inspect paginated user and agent actions (FLOW_RUN, FLOW_KILL, LOGIN, TOKEN_CREATED, etc.).",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -128,9 +136,17 @@ func (s *Server) registerTools() {
 					"type":        "string",
 					"description": "Optional exact action filter (e.g. FLOW_RUN, FLOW_KILL, LOGIN).",
 				},
+				"q": map[string]any{
+					"type":        "string",
+					"description": "Optional substring search across username, target, source, and details.",
+				},
 				"limit": map[string]any{
 					"type":        "integer",
 					"description": "Maximum audit entries to return (default 50, max 200).",
+				},
+				"offset": map[string]any{
+					"type":        "integer",
+					"description": "Number of matching entries to skip for pagination (default 0).",
 				},
 			},
 		},
@@ -242,19 +258,14 @@ func (s *Server) toolRunFlow(ctx context.Context, raw json.RawMessage) (any, err
 func (s *Server) toolListExecutions(ctx context.Context, raw json.RawMessage) (any, error) {
 	var args struct {
 		Status string `json:"status"`
+		Query  string `json:"q"`
 		Limit  int    `json:"limit"`
+		Offset int    `json:"offset"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return nil, err
 	}
-	stats, runs, err := service.ListExecutions(ctx, s.store, args.Status, args.Limit, 20, 100)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"stats": stats,
-		"runs":  runs,
-	}, nil
+	return service.ListExecutions(ctx, s.store, args.Status, args.Query, args.Limit, args.Offset, 20, 100)
 }
 
 func (s *Server) toolGetExecution(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -308,16 +319,14 @@ func (s *Server) toolKillExecution(ctx context.Context, raw json.RawMessage) (an
 func (s *Server) toolListAuditLogs(ctx context.Context, raw json.RawMessage) (any, error) {
 	var args struct {
 		Action string `json:"action"`
+		Query  string `json:"q"`
 		Limit  int    `json:"limit"`
+		Offset int    `json:"offset"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return nil, err
 	}
-	logs, err := service.ListAuditLogs(ctx, s.store, args.Limit, 50, 200, args.Action)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"logs": logs}, nil
+	return service.ListAuditLogs(ctx, s.store, args.Limit, args.Offset, 50, 200, args.Action, args.Query)
 }
 
 func (s *Server) listFlowResources() ([]map[string]any, error) {

@@ -87,6 +87,25 @@ type ExecutionDetail struct {
 	ChildRuns []Execution `json:"child_runs"`
 }
 
+// ExecutionsPage represents a paginated list of runs alongside aggregate stats.
+type ExecutionsPage struct {
+	Stats   db.RunStats `json:"stats"`
+	Runs    []Execution `json:"runs"`
+	Total   int         `json:"total"`
+	Limit   int         `json:"limit"`
+	Offset  int         `json:"offset"`
+	HasMore bool        `json:"has_more"`
+}
+
+// AuditLogsPage represents a paginated slice of audit log entries.
+type AuditLogsPage struct {
+	Logs    []AuditLog `json:"logs"`
+	Total   int        `json:"total"`
+	Limit   int        `json:"limit"`
+	Offset  int        `json:"offset"`
+	HasMore bool       `json:"has_more"`
+}
+
 // AuditLog is the shared DTO for audit_logs entries across REST API and MCP.
 type AuditLog struct {
 	ID        int64  `json:"id"`
@@ -239,29 +258,46 @@ func GetFlowDetail(ctx context.Context, store *db.Store, flowsDir, target string
 	}, nil
 }
 
-// ListExecutions validates statusFilter and returns aggregate stats alongside bounded execution rows.
-func ListExecutions(ctx context.Context, store *db.Store, statusFilter string, limit, defLimit, maxLimit int) (db.RunStats, []Execution, error) {
+// ListExecutions validates statusFilter and returns paginated execution rows alongside aggregate stats.
+func ListExecutions(ctx context.Context, store *db.Store, statusFilter, search string, limit, offset, defLimit, maxLimit int) (*ExecutionsPage, error) {
 	status := strings.ToUpper(strings.TrimSpace(statusFilter))
 	switch status {
 	case "", db.StatusRunning, db.StatusSuccess, db.StatusFailed, db.StatusKilled:
 	default:
-		return db.RunStats{}, nil, fmt.Errorf("%w: %q", ErrInvalidStatus, statusFilter)
+		return nil, fmt.Errorf("%w: %q", ErrInvalidStatus, statusFilter)
 	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	lim := ClampLimit(limit, defLimit, maxLimit)
 
 	stats, err := store.GetRunStats(ctx)
 	if err != nil {
-		return db.RunStats{}, nil, err
+		return nil, err
 	}
-	runsRaw, err := store.ListRuns(ctx, ClampLimit(limit, defLimit, maxLimit), status)
+	runsRaw, total, err := store.ListRunsPage(ctx, db.RunQuery{
+		Status: status,
+		Search: search,
+		Limit:  lim,
+		Offset: offset,
+	})
 	if err != nil {
-		return db.RunStats{}, nil, err
+		return nil, err
 	}
 
 	runs := make([]Execution, 0, len(runsRaw))
 	for _, rec := range runsRaw {
 		runs = append(runs, ToExecution(rec))
 	}
-	return stats, runs, nil
+	return &ExecutionsPage{
+		Stats:   stats,
+		Runs:    runs,
+		Total:   total,
+		Limit:   lim,
+		Offset:  offset,
+		HasMore: offset+len(runs) < total,
+	}, nil
 }
 
 // GetExecutionDetail loads a run along with its task runs and child subflow runs.
@@ -316,9 +352,18 @@ func GetExecutionDetail(ctx context.Context, store *db.Store, runID string) (*Ex
 	}, nil
 }
 
-// ListAuditLogs returns bounded audit log DTOs filtered optionally by action.
-func ListAuditLogs(ctx context.Context, store *db.Store, limit, defLimit, maxLimit int, actionFilter string) ([]AuditLog, error) {
-	logsRaw, err := store.ListAuditLogs(ctx, ClampLimit(limit, defLimit, maxLimit), actionFilter)
+// ListAuditLogs returns paginated audit log DTOs filtered optionally by action and search string.
+func ListAuditLogs(ctx context.Context, store *db.Store, limit, offset, defLimit, maxLimit int, actionFilter, search string) (*AuditLogsPage, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	lim := ClampLimit(limit, defLimit, maxLimit)
+	logsRaw, total, err := store.ListAuditLogsPage(ctx, db.AuditQuery{
+		Action: actionFilter,
+		Search: search,
+		Limit:  lim,
+		Offset: offset,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -334,5 +379,11 @@ func ListAuditLogs(ctx context.Context, store *db.Store, limit, defLimit, maxLim
 			CreatedAt: l.CreatedAt,
 		})
 	}
-	return out, nil
+	return &AuditLogsPage{
+		Logs:    out,
+		Total:   total,
+		Limit:   lim,
+		Offset:  offset,
+		HasMore: offset+len(out) < total,
+	}, nil
 }

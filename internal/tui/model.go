@@ -53,6 +53,7 @@ type Model struct {
 
 	// Executions tab state
 	filterIdx     int
+	execPage      int
 	execIdx       int
 	selectedRunID string // non-empty means Execution Detail & Logs view
 	taskIdx       int
@@ -63,6 +64,7 @@ type Model struct {
 
 	// Audit tab state
 	auditFilterIdx int
+	auditPage      int
 	auditIdx       int
 
 	// Transient feedback banner
@@ -119,7 +121,7 @@ func (m *Model) currentFilter() string {
 }
 
 func (m *Model) refreshCmd() tea.Cmd {
-	return loadSnapshotCmd(m.cfg.Store, m.cfg.FlowsDir, m.currentFilter(), m.selectedRunID, m.currentAuditFilter())
+	return loadSnapshotCmd(m.cfg.Store, m.cfg.FlowsDir, m.currentFilter(), m.selectedRunID, m.currentAuditFilter(), m.execPage, m.auditPage)
 }
 
 func (m *Model) setToast(text string, isErr bool) {
@@ -337,8 +339,21 @@ func (m *Model) clampCursors() {
 
 	if len(m.snap.AuditLogs) == 0 {
 		m.auditIdx = 0
+		if m.snap.AuditTotal == 0 {
+			m.auditPage = 0
+		} else if maxP := (m.snap.AuditTotal - 1) / tuiPageSize; m.auditPage > maxP {
+			m.auditPage = maxP
+		}
 	} else if m.auditIdx >= len(m.snap.AuditLogs) {
 		m.auditIdx = len(m.snap.AuditLogs) - 1
+	}
+
+	if len(m.snap.Runs) == 0 && m.snap.RunsTotal > 0 {
+		if maxP := (m.snap.RunsTotal - 1) / tuiPageSize; m.execPage > maxP {
+			m.execPage = maxP
+		}
+	} else if m.snap.RunsTotal == 0 {
+		m.execPage = 0
 	}
 }
 
@@ -487,12 +502,12 @@ func (m *Model) renderFooter() string {
 		}
 	case tabExecutions:
 		if m.selectedRunID == "" {
-			hints = append(hints, styleKeyHint.Render("↑/↓")+" select", styleKeyHint.Render("f")+" filter", styleKeyHint.Render("Enter")+" logs", styleKeyHint.Render("k")+" kill")
+			hints = append(hints, styleKeyHint.Render("↑/↓")+" select", styleKeyHint.Render("[/]")+" page", styleKeyHint.Render("f")+" filter", styleKeyHint.Render("Enter")+" logs", styleKeyHint.Render("k")+" kill")
 		} else {
 			hints = append(hints, styleKeyHint.Render("←/→")+" task", styleKeyHint.Render("↑/↓ g/G")+" scroll", styleKeyHint.Render("a")+" follow", styleKeyHint.Render("k")+" kill", styleKeyHint.Render("Esc")+" back")
 		}
 	case tabAudit:
-		hints = append(hints, styleKeyHint.Render("↑/↓")+" select", styleKeyHint.Render("f")+" filter action")
+		hints = append(hints, styleKeyHint.Render("↑/↓")+" select", styleKeyHint.Render("[/]")+" page", styleKeyHint.Render("f")+" filter action")
 	}
 	hints = append(hints, styleKeyHint.Render("R")+" refresh", styleKeyHint.Render("q")+" quit")
 	return " " + strings.Join(hints, styleMuted.Render(" · "))

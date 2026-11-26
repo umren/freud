@@ -6,12 +6,105 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"freud/internal/db"
 	"freud/internal/engine"
 )
+
+const defaultWebPageSize = 50
+
+type paginationView struct {
+	Page           int
+	TotalPages     int
+	Total          int
+	StartItem      int
+	EndItem        int
+	HasPrev        bool
+	HasNext        bool
+	PrevURL        string
+	NextURL        string
+	PrevPartialURL string
+	NextPartialURL string
+}
+
+func parsePageParam(r *http.Request) int {
+	raw := strings.TrimSpace(r.URL.Query().Get("page"))
+	if raw == "" {
+		return 1
+	}
+	p, err := strconv.Atoi(raw)
+	if err != nil || p < 1 {
+		return 1
+	}
+	return p
+}
+
+func buildPaginationView(basePath, partialPath string, baseParams url.Values, page, pageSize, total int) paginationView {
+	if pageSize <= 0 {
+		pageSize = defaultWebPageSize
+	}
+	totalPages := 1
+	if total > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	startItem, endItem := 0, 0
+	if total > 0 {
+		startItem = (page-1)*pageSize + 1
+		endItem = min(total, page*pageSize)
+	}
+
+	buildURL := func(prefix string, p int) string {
+		if prefix == "" {
+			return ""
+		}
+		vals := url.Values{}
+		for k, vv := range baseParams {
+			for _, v := range vv {
+				if v != "" {
+					vals.Add(k, v)
+				}
+			}
+		}
+		if p > 1 {
+			vals.Set("page", strconv.Itoa(p))
+		}
+		enc := vals.Encode()
+		if enc == "" {
+			return prefix
+		}
+		return prefix + "?" + enc
+	}
+
+	pv := paginationView{
+		Page:       page,
+		TotalPages: totalPages,
+		Total:      total,
+		StartItem:  startItem,
+		EndItem:    endItem,
+		HasPrev:    page > 1,
+		HasNext:    page < totalPages,
+	}
+	if pv.HasPrev {
+		pv.PrevURL = buildURL(basePath, page-1)
+		pv.PrevPartialURL = buildURL(partialPath, page-1)
+	}
+	if pv.HasNext {
+		pv.NextURL = buildURL(basePath, page+1)
+		pv.NextPartialURL = buildURL(partialPath, page+1)
+	}
+	return pv
+}
 
 type runRowView struct {
 	ID           string
@@ -30,7 +123,9 @@ type runRowView struct {
 type executionsViewData struct {
 	basePageData
 	StatusFilter string
+	Query        string
 	Runs         []runRowView
+	Pagination   paginationView
 }
 
 type taskRunView struct {
@@ -67,7 +162,7 @@ type runSnapshot struct {
 	} `json:"tasks"`
 }
 
-func (s *Server) buildExecutionsData(r *http.Request, statusFilter string) (executionsViewData, error) {
+func (s *Server) buildExecutionsData(r *http.Request, statusFilter, searchQuery string, page int) (executionsViewData, error) {
 	ctx := r.Context()
 	statusFilter = strings.ToUpper(strings.TrimSpace(statusFilter))
 	switch statusFilter {
@@ -75,25 +170,55 @@ func (s *Server) buildExecutionsData(r *http.Request, statusFilter string) (exec
 	default:
 		statusFilter = ""
 	}
+	searchQuery = strings.TrimSpace(searchQuery)
 
 	stats, err := s.store.GetRunStats(ctx)
 	if err != nil {
 		return executionsViewData{}, err
 	}
-	runs, err := s.store.ListRuns(ctx, 200, statusFilter)
+	runs, total, err := s.store.ListRunsPage(ctx, db.RunQuery{
+		Status: statusFilter,
+		Search: searchQuery,
+		Limit:  defaultWebPageSize,
+		Offset: (page - 1) * defaultWebPageSize,
+	})
 	if err != nil {
 		return executionsViewData{}, err
+	}
+
+	params := url.Values{}
+	if statusFilter != "" {
+		params.Set("status", statusFilter)
+	}
+	if searchQuery != "" {
+		params.Set("q", searchQuery)
+	}
+	pg := buildPaginationView("/executions", "/partials/executions", params, page, defaultWebPageSize, total)
+	if pg.Page != page && total > 0 {
+		runs, total, err = s.store.ListRunsPage(ctx, db.RunQuery{
+			Status: statusFilter,
+			Search: searchQuery,
+			Limit:  defaultWebPageSize,
+			Offset: (pg.Page - 1) * defaultWebPageSize,
+		})
+		if err != nil {
+			return executionsViewData{}, err
+		}
+		pg = buildPaginationView("/executions", "/partials/executions", params, pg.Page, defaultWebPageSize, total)
 	}
 
 	return executionsViewData{
 		basePageData: s.newBaseData(r, "Executions", "executions", stats.Running),
 		StatusFilter: statusFilter,
+		Query:        searchQuery,
 		Runs:         toRunRowViews(runs, time.Now()),
+		Pagination:   pg,
 	}, nil
 }
 
 func (s *Server) handleExecutions(w http.ResponseWriter, r *http.Request) {
-	data, err := s.buildExecutionsData(r, r.URL.Query().Get("status"))
+	q := r.URL.Query()
+	data, err := s.buildExecutionsData(r, q.Get("status"), q.Get("q"), parsePageParam(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -102,7 +227,8 @@ func (s *Server) handleExecutions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExecutionsPartial(w http.ResponseWriter, r *http.Request) {
-	data, err := s.buildExecutionsData(r, r.URL.Query().Get("status"))
+	q := r.URL.Query()
+	data, err := s.buildExecutionsData(r, q.Get("status"), q.Get("q"), parsePageParam(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

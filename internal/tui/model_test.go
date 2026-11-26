@@ -263,4 +263,25 @@ func TestTUIDashboardExecutionsFilterMultiTaskAndSubflows(t *testing.T) {
 	if !strings.Contains(filteredAudit, "Filter: LOGIN") || !strings.Contains(filteredAudit, "admin") || strings.Contains(filteredAudit, "FLOW_RUN") {
 		t.Fatalf("expected LOGIN-filtered audit view, got:\n%s", filteredAudit)
 	}
+
+	// Verify pagination across >50 audit rows using ']' and '['.
+	for i := 0; i < tuiPageSize+5; i++ {
+		if err := store.RecordAudit(ctx, "pager", "LOGIN", "dream", "tui", ""); err != nil {
+			t.Fatalf("seed audit %d: %v", i, err)
+		}
+	}
+	m.Update(m.refreshCmd()())
+	if !strings.Contains(m.View(), "Page 1/2") {
+		t.Fatalf("expected Page 1/2 in audit view, got:\n%s", m.View())
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	m.Update(m.refreshCmd()())
+	if !strings.Contains(m.View(), "Page 2/2") {
+		t.Fatalf("expected Page 2/2 after ']', got:\n%s", m.View())
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
+	m.Update(m.refreshCmd()())
+	if !strings.Contains(m.View(), "Page 1/2") {
+		t.Fatalf("expected Page 1/2 after '[', got:\n%s", m.View())
+	}
 }

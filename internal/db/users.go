@@ -233,23 +233,66 @@ func (s *Store) RecordAudit(ctx context.Context, username, action, target, sourc
 	return nil
 }
 
+// AuditQuery configures filtering and pagination when listing audit_logs.
+type AuditQuery struct {
+	Action string
+	Search string
+	Limit  int
+	Offset int
+}
+
 // ListAuditLogs returns audit log entries ordered from newest to oldest, optionally filtered by action.
 func (s *Store) ListAuditLogs(ctx context.Context, limit int, actionFilter string) ([]AuditLogRecord, error) {
-	query := `SELECT id, username, action, target, source, details, created_at FROM audit_logs`
+	logs, _, err := s.ListAuditLogsPage(ctx, AuditQuery{
+		Action: actionFilter,
+		Limit:  limit,
+	})
+	return logs, err
+}
+
+// ListAuditLogsPage returns matching audit_logs ordered newest-first alongside the total match count.
+func (s *Store) ListAuditLogsPage(ctx context.Context, q AuditQuery) ([]AuditLogRecord, int, error) {
+	var where []string
 	var args []any
-	if actionFilter = strings.ToUpper(strings.TrimSpace(actionFilter)); actionFilter != "" {
-		query += ` WHERE action = ?`
-		args = append(args, actionFilter)
+
+	if action := strings.ToUpper(strings.TrimSpace(q.Action)); action != "" {
+		where = append(where, `action = ?`)
+		args = append(args, action)
 	}
-	query += ` ORDER BY id DESC`
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
+	if strings.TrimSpace(q.Search) != "" {
+		pat := likePattern(q.Search)
+		where = append(where, `(LOWER(username) LIKE ? ESCAPE '!' OR LOWER(COALESCE(target, '')) LIKE ? ESCAPE '!' OR LOWER(source) LIKE ? ESCAPE '!' OR LOWER(COALESCE(details, '')) LIKE ? ESCAPE '!')`)
+		args = append(args, pat, pat, pat, pat)
 	}
 
-	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	whereSQL := ""
+	if len(where) > 0 {
+		whereSQL = ` WHERE ` + strings.Join(where, ` AND `)
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM audit_logs`+whereSQL), args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count audit logs: %w", err)
+	}
+
+	query := `SELECT id, username, action, target, source, details, created_at FROM audit_logs` + whereSQL + ` ORDER BY id DESC`
+	queryArgs := append([]any(nil), args...)
+	limit := q.Limit
+	if q.Offset > 0 && limit <= 0 {
+		limit = 200
+	}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		queryArgs = append(queryArgs, limit)
+		if q.Offset > 0 {
+			query += ` OFFSET ?`
+			queryArgs = append(queryArgs, q.Offset)
+		}
+	}
+
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), queryArgs...)
 	if err != nil {
-		return nil, fmt.Errorf("list audit logs: %w", err)
+		return nil, 0, fmt.Errorf("list audit logs: %w", err)
 	}
 	defer rows.Close()
 
@@ -257,11 +300,14 @@ func (s *Store) ListAuditLogs(ctx context.Context, limit int, actionFilter strin
 	for rows.Next() {
 		var rec AuditLogRecord
 		if err := rows.Scan(&rec.ID, &rec.Username, &rec.Action, &rec.Target, &rec.Source, &rec.Details, &rec.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan audit log: %w", err)
+			return nil, 0, fmt.Errorf("scan audit log: %w", err)
 		}
 		logs = append(logs, rec)
 	}
-	return logs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return logs, total, nil
 }
 
 // CreateAPIToken persists a hashed API token belonging to username.

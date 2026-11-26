@@ -26,8 +26,21 @@ func (m *Model) handleExecutionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "f":
 			m.filterIdx = (m.filterIdx + 1) % len(execStatusFilters)
+			m.execPage = 0
 			m.execIdx = 0
 			return m, m.refreshCmd()
+		case "[", "pgup":
+			if m.execPage > 0 {
+				m.execPage--
+				m.execIdx = 0
+				return m, m.refreshCmd()
+			}
+		case "]", "pgdown":
+			if (m.execPage+1)*tuiPageSize < m.snap.RunsTotal {
+				m.execPage++
+				m.execIdx = 0
+				return m, m.refreshCmd()
+			}
 		case "enter":
 			if len(m.snap.Runs) > 0 && m.execIdx < len(m.snap.Runs) {
 				m.openExecutionDetail(m.snap.Runs[m.execIdx].ID)
@@ -126,10 +139,14 @@ func (m *Model) renderExecutions() string {
 		filterLabel = "ALL"
 	}
 
+	totalPages := max(1, (m.snap.RunsTotal+tuiPageSize-1)/tuiPageSize)
+	curPage := min(totalPages, m.execPage+1)
+
 	var lines []string
-	lines = append(lines, fmt.Sprintf("%s   %s",
-		styleSectionTitle.Render(fmt.Sprintf("Execution History (%d)", len(m.snap.Runs))),
+	lines = append(lines, fmt.Sprintf("%s   %s   %s",
+		styleSectionTitle.Render(fmt.Sprintf("Execution History (%d)", m.snap.RunsTotal)),
 		styleKeyHint.Render("[f] Filter: "+filterLabel),
+		styleKeyHint.Render(fmt.Sprintf("[/] Page %d/%d", curPage, totalPages)),
 	))
 
 	if len(m.snap.Runs) == 0 {

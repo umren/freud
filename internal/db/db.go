@@ -648,21 +648,73 @@ func (s *Store) GetRunStats(ctx context.Context) (RunStats, error) {
 	return stats, nil
 }
 
+// RunQuery configures filtering and pagination when listing runs.
+type RunQuery struct {
+	Status string
+	Search string
+	Limit  int
+	Offset int
+}
+
+func likePattern(raw string) string {
+	esc := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
+	return "%" + esc.Replace(strings.ToLower(strings.TrimSpace(raw))) + "%"
+}
+
 // ListRuns returns runs ordered from newest to oldest, optionally filtered by status.
 func (s *Store) ListRuns(ctx context.Context, limit int, statusFilter string) ([]RunRecord, error) {
-	query := `SELECT ` + runSelectCols + ` FROM runs`
+	runs, _, err := s.ListRunsPage(ctx, RunQuery{
+		Status: statusFilter,
+		Limit:  limit,
+	})
+	return runs, err
+}
+
+// ListRunsPage returns matching runs ordered newest-first alongside the total match count.
+func (s *Store) ListRunsPage(ctx context.Context, q RunQuery) ([]RunRecord, int, error) {
+	var where []string
 	var args []any
-	if statusFilter != "" {
-		query += ` WHERE status = ?`
-		args = append(args, statusFilter)
+
+	if status := strings.TrimSpace(q.Status); status != "" {
+		where = append(where, `status = ?`)
+		args = append(args, status)
 	}
-	query += ` ORDER BY created_at DESC`
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
+	if strings.TrimSpace(q.Search) != "" {
+		pat := likePattern(q.Search)
+		where = append(where, `(LOWER(id) LIKE ? ESCAPE '!' OR LOWER(workflow_name) LIKE ? ESCAPE '!' OR LOWER(COALESCE(triggered_by, '')) LIKE ? ESCAPE '!')`)
+		args = append(args, pat, pat, pat)
 	}
 
-	return s.queryRuns(ctx, query, args...)
+	whereSQL := ""
+	if len(where) > 0 {
+		whereSQL = ` WHERE ` + strings.Join(where, ` AND `)
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM runs`+whereSQL), args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count runs: %w", err)
+	}
+
+	query := `SELECT ` + runSelectCols + ` FROM runs` + whereSQL + ` ORDER BY created_at DESC`
+	queryArgs := append([]any(nil), args...)
+	limit := q.Limit
+	if q.Offset > 0 && limit <= 0 {
+		limit = 200
+	}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		queryArgs = append(queryArgs, limit)
+		if q.Offset > 0 {
+			query += ` OFFSET ?`
+			queryArgs = append(queryArgs, q.Offset)
+		}
+	}
+
+	runs, err := s.queryRuns(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	return runs, total, nil
 }
 
 // ListRunsByWorkflow returns runs for a specific workflow ordered from newest to oldest.

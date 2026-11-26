@@ -62,6 +62,8 @@ type auditViewData struct {
 	Users        []userRowView
 	AuditLogs    []auditRowView
 	ActionFilter string
+	Query        string
+	Pagination   paginationView
 	FlashMsg     string
 	FlashErr     string
 }
@@ -373,6 +375,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
 	actionFilter := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("action")))
+	searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+	page := parsePageParam(r)
+
 	stats, err := s.store.GetRunStats(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -384,10 +389,37 @@ func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logsRaw, err := s.store.ListAuditLogs(r.Context(), 200, actionFilter)
+	logsRaw, total, err := s.store.ListAuditLogsPage(r.Context(), db.AuditQuery{
+		Action: actionFilter,
+		Search: searchQuery,
+		Limit:  defaultWebPageSize,
+		Offset: (page - 1) * defaultWebPageSize,
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	params := url.Values{}
+	if actionFilter != "" {
+		params.Set("action", actionFilter)
+	}
+	if searchQuery != "" {
+		params.Set("q", searchQuery)
+	}
+	pg := buildPaginationView("/audit", "", params, page, defaultWebPageSize, total)
+	if pg.Page != page && total > 0 {
+		logsRaw, total, err = s.store.ListAuditLogsPage(r.Context(), db.AuditQuery{
+			Action: actionFilter,
+			Search: searchQuery,
+			Limit:  defaultWebPageSize,
+			Offset: (pg.Page - 1) * defaultWebPageSize,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		pg = buildPaginationView("/audit", "", params, pg.Page, defaultWebPageSize, total)
 	}
 
 	users := make([]userRowView, 0, len(usersRaw))
@@ -419,6 +451,8 @@ func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
 		Users:        users,
 		AuditLogs:    logs,
 		ActionFilter: actionFilter,
+		Query:        searchQuery,
+		Pagination:   pg,
 		FlashMsg:     r.URL.Query().Get("msg"),
 		FlashErr:     r.URL.Query().Get("err"),
 	})

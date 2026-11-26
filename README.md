@@ -266,10 +266,10 @@ curl -s -H "Authorization: Bearer $FREUD_TOKEN" http://localhost:4321/api/v1/flo
 | `GET` | `/api/v1/flows` | Any user | List discovered workflows in `flows/` with cron schedule and latest run |
 | `GET` | `/api/v1/flows/{file}` | Any user | Flow details, parsed task list, raw YAML, and recent runs |
 | `POST` | `/api/v1/flows/{file}/run` | Any user | Start workflow execution asynchronously (`202 Accepted` with `run_id`) |
-| `GET` | `/api/v1/executions` | Any user | Run stats + list runs (`?status=RUNNING\|SUCCESS\|FAILED\|KILLED&limit=50`) |
+| `GET` | `/api/v1/executions` | Any user | Run stats + paginated runs (`?status=RUNNING\|SUCCESS\|FAILED\|KILLED&q=&limit=50&offset=0`) |
 | `GET` | `/api/v1/executions/{id}` | Any user | Execution metadata, child subflow runs, and task runs including logs |
 | `POST` | `/api/v1/executions/{id}/kill` | Any user | Terminate an active run and record `KILLED` status |
-| `GET` | `/api/v1/audit` | Any user | Activity audit log (`?action=FLOW_RUN&limit=100`) |
+| `GET` | `/api/v1/audit` | Any user | Paginated activity audit log (`?action=FLOW_RUN&q=&limit=100&offset=0`) |
 | `GET` | `/api/v1/users` | Any user | List registered accounts (without password hashes) |
 | `POST` | `/api/v1/users` | **Admin only** | Create user (`{"username","password","is_admin"}`) |
 | `DELETE` | `/api/v1/users/{username}` | **Admin only** | Delete user account (revokes sessions & API tokens) |
@@ -319,10 +319,10 @@ Freud embeds a zero-dependency **MCP JSON-RPC 2.0 server** inside the same binar
   - `list_flows` — list discovered YAML flows, cron schedules, and latest run status
   - `get_flow` (`{file}`) — inspect workflow tasks, dependencies, raw YAML, and recent runs
   - `run_flow` (`{file, wait?, timeout_seconds?}`) — trigger a workflow asynchronously or wait (up to 300s) for completion & task logs
-  - `list_executions` (`{status?, limit?}`) — query execution history and status stats
+  - `list_executions` (`{status?, q?, limit?, offset?}`) — query paginated execution history and status stats
   - `get_execution` (`{run_id}`) — inspect execution status, `triggered_by`, child subflows, and task logs
   - `kill_execution` (`{run_id}`) — terminate an active `RUNNING` execution
-  - `list_audit_logs` (`{action?, limit?}`) — query activity audit trail
+  - `list_audit_logs` (`{action?, q?, limit?, offset?}`) — query paginated activity audit trail
 - **Resources**:
   - `freud://flows/{file}` (`text/yaml`) via `resources/list` and `resources/read`
 

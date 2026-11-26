@@ -76,8 +76,8 @@ func decodeJSONBody(r *http.Request, dst any) error {
 	return json.Unmarshal(body, dst)
 }
 
-func parseLimitParam(r *http.Request, def, maxVal int) int {
-	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+func parseIntQueryParam(r *http.Request, name string, def int) int {
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
 	if raw == "" {
 		return def
 	}
@@ -85,7 +85,11 @@ func parseLimitParam(r *http.Request, def, maxVal int) int {
 	if err != nil {
 		return def
 	}
-	return service.ClampLimit(n, def, maxVal)
+	return n
+}
+
+func parseLimitParam(r *http.Request, def, maxVal int) int {
+	return service.ClampLimit(parseIntQueryParam(r, "limit", def), def, maxVal)
 }
 
 func (s *Server) handleAPIHealth(w http.ResponseWriter, r *http.Request) {
@@ -164,11 +168,13 @@ func (s *Server) handleAPIRunFlow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIExecutions(w http.ResponseWriter, r *http.Request) {
-	stats, runs, err := service.ListExecutions(
+	page, err := service.ListExecutions(
 		r.Context(),
 		s.store,
 		r.URL.Query().Get("status"),
+		r.URL.Query().Get("q"),
 		parseLimitParam(r, 50, 200),
+		parseIntQueryParam(r, "offset", 0),
 		50,
 		200,
 	)
@@ -176,10 +182,7 @@ func (s *Server) handleAPIExecutions(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"stats": stats,
-		"runs":  runs,
-	})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) handleAPIExecutionDetail(w http.ResponseWriter, r *http.Request) {
@@ -211,12 +214,21 @@ func (s *Server) handleAPIKillExecution(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleAPIAudit(w http.ResponseWriter, r *http.Request) {
-	logs, err := service.ListAuditLogs(r.Context(), s.store, parseLimitParam(r, 100, 500), 100, 500, r.URL.Query().Get("action"))
+	page, err := service.ListAuditLogs(
+		r.Context(),
+		s.store,
+		parseLimitParam(r, 100, 500),
+		parseIntQueryParam(r, "offset", 0),
+		100,
+		500,
+		r.URL.Query().Get("action"),
+		r.URL.Query().Get("q"),
+	)
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"logs": logs})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) handleAPIUsersList(w http.ResponseWriter, r *http.Request) {

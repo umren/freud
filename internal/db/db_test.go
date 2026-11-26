@@ -131,6 +131,15 @@ func TestStoreQueriesAndIncrementalLogs(t *testing.T) {
 		t.Fatalf("unexpected failed filter result: %+v, err=%v", failedRuns, err)
 	}
 
+	pageRuns, totalRuns, err := store.ListRunsPage(ctx, RunQuery{Limit: 1, Offset: 1})
+	if err != nil || totalRuns != 3 || len(pageRuns) != 1 || pageRuns[0].ID != "r2" {
+		t.Fatalf("unexpected ListRunsPage offset result: runs=%+v total=%d err=%v", pageRuns, totalRuns, err)
+	}
+	searchRuns, totalSearch, err := store.ListRunsPage(ctx, RunQuery{Search: "wf-b", Limit: 10})
+	if err != nil || totalSearch != 1 || len(searchRuns) != 1 || searchRuns[0].ID != "r3" {
+		t.Fatalf("unexpected ListRunsPage search result: runs=%+v total=%d err=%v", searchRuns, totalSearch, err)
+	}
+
 	latest, err := store.GetLatestRunByWorkflow(ctx)
 	if err != nil {
 		t.Fatalf("GetLatestRunByWorkflow: %v", err)
@@ -426,5 +435,13 @@ func runStoreUsersAndAuditChecks(t *testing.T, store *Store) {
 	filtered, err := store.ListAuditLogs(ctx, 10, "LOGIN")
 	if err != nil || len(filtered) != 1 || filtered[0].Username != "admin" {
 		t.Fatalf("unexpected filtered audit logs: %+v err=%v", filtered, err)
+	}
+	pagedAudit, totalAudit, err := store.ListAuditLogsPage(ctx, AuditQuery{Limit: 1, Offset: 1})
+	if err != nil || totalAudit != 2 || len(pagedAudit) != 1 || pagedAudit[0].Action != "LOGIN" {
+		t.Fatalf("unexpected paged audit logs: logs=%+v total=%d err=%v", pagedAudit, totalAudit, err)
+	}
+	searchedAudit, totalAuditSearch, err := store.ListAuditLogsPage(ctx, AuditQuery{Search: "123", Limit: 10})
+	if err != nil || totalAuditSearch != 1 || len(searchedAudit) != 1 || searchedAudit[0].Action != "FLOW_RUN" {
+		t.Fatalf("unexpected searched audit logs: logs=%+v total=%d err=%v", searchedAudit, totalAuditSearch, err)
 	}
 }

@@ -91,27 +91,26 @@
   </section>
 </div>
 
-<section class="card" x-data="{ query: '' }">
+<section class="card">
   <div class="card-head">
-    <h2 class="card-title">Audit Log ({{len .AuditLogs}})</h2>
-    <div class="toolbar">
-      <input class="input" type="search" placeholder="Filter user, target, details..." x-model="query">
-      <form method="get" action="/audit" style="display:inline">
-        <select class="select" name="action" onchange="this.form.submit()">
-          <option value="">All actions</option>
-          <option value="SETUP_ADMIN" {{if eq .ActionFilter "SETUP_ADMIN"}}selected{{end}}>SETUP_ADMIN</option>
-          <option value="LOGIN" {{if eq .ActionFilter "LOGIN"}}selected{{end}}>LOGIN</option>
-          <option value="LOGOUT" {{if eq .ActionFilter "LOGOUT"}}selected{{end}}>LOGOUT</option>
-          <option value="FLOW_RUN" {{if eq .ActionFilter "FLOW_RUN"}}selected{{end}}>FLOW_RUN</option>
-          <option value="FLOW_KILL" {{if eq .ActionFilter "FLOW_KILL"}}selected{{end}}>FLOW_KILL</option>
-          <option value="USER_CREATED" {{if eq .ActionFilter "USER_CREATED"}}selected{{end}}>USER_CREATED</option>
-          <option value="USER_DELETED" {{if eq .ActionFilter "USER_DELETED"}}selected{{end}}>USER_DELETED</option>
-          <option value="PASSWORD_CHANGED" {{if eq .ActionFilter "PASSWORD_CHANGED"}}selected{{end}}>PASSWORD_CHANGED</option>
-          <option value="TOKEN_CREATED" {{if eq .ActionFilter "TOKEN_CREATED"}}selected{{end}}>TOKEN_CREATED</option>
-          <option value="TOKEN_REVOKED" {{if eq .ActionFilter "TOKEN_REVOKED"}}selected{{end}}>TOKEN_REVOKED</option>
-        </select>
-      </form>
-    </div>
+    <h2 class="card-title">Audit Log ({{.Pagination.Total}})</h2>
+    <form method="get" action="/audit" class="toolbar">
+      <input class="input" type="search" name="q" value="{{.Query}}" placeholder="Filter user, target, details...">
+      <select class="select" name="action" onchange="this.form.submit()">
+        <option value="">All actions</option>
+        <option value="SETUP_ADMIN" {{if eq .ActionFilter "SETUP_ADMIN"}}selected{{end}}>SETUP_ADMIN</option>
+        <option value="LOGIN" {{if eq .ActionFilter "LOGIN"}}selected{{end}}>LOGIN</option>
+        <option value="LOGOUT" {{if eq .ActionFilter "LOGOUT"}}selected{{end}}>LOGOUT</option>
+        <option value="FLOW_RUN" {{if eq .ActionFilter "FLOW_RUN"}}selected{{end}}>FLOW_RUN</option>
+        <option value="FLOW_KILL" {{if eq .ActionFilter "FLOW_KILL"}}selected{{end}}>FLOW_KILL</option>
+        <option value="USER_CREATED" {{if eq .ActionFilter "USER_CREATED"}}selected{{end}}>USER_CREATED</option>
+        <option value="USER_DELETED" {{if eq .ActionFilter "USER_DELETED"}}selected{{end}}>USER_DELETED</option>
+        <option value="PASSWORD_CHANGED" {{if eq .ActionFilter "PASSWORD_CHANGED"}}selected{{end}}>PASSWORD_CHANGED</option>
+        <option value="TOKEN_CREATED" {{if eq .ActionFilter "TOKEN_CREATED"}}selected{{end}}>TOKEN_CREATED</option>
+        <option value="TOKEN_REVOKED" {{if eq .ActionFilter "TOKEN_REVOKED"}}selected{{end}}>TOKEN_REVOKED</option>
+      </select>
+      <button type="submit" class="btn">Filter</button>
+    </form>
   </div>
   {{if .AuditLogs}}
   <table>
@@ -127,7 +126,7 @@
     </thead>
     <tbody>
       {{range .AuditLogs}}
-      <tr x-show="query === '' || '{{.SearchKey}}'.includes(query.toLowerCase())">
+      <tr>
         <td class="mono muted">{{.CreatedAt}}</td>
         <td class="mono"><strong>{{.Username}}</strong></td>
         <td><span class="badge badge-{{.ActionSlug}}">{{.Action}}</span></td>
@@ -140,6 +139,25 @@
   </table>
   {{else}}
   <div class="empty">No user activity recorded yet.</div>
+  {{end}}
+  {{if gt .Pagination.Total 0}}
+  <div class="card-body toolbar" style="justify-content:space-between;border-top:1px solid var(--border)">
+    <div class="muted mono" style="font-size:12px">
+      Showing {{.Pagination.StartItem}}–{{.Pagination.EndItem}} of {{.Pagination.Total}} · Page {{.Pagination.Page}}/{{.Pagination.TotalPages}}
+    </div>
+    <div class="toolbar">
+      {{if .Pagination.HasPrev}}
+        <a class="btn" href="{{.Pagination.PrevURL}}">← Prev</a>
+      {{else}}
+        <span class="btn muted" style="opacity:0.45;pointer-events:none">← Prev</span>
+      {{end}}
+      {{if .Pagination.HasNext}}
+        <a class="btn" href="{{.Pagination.NextURL}}">Next →</a>
+      {{else}}
+        <span class="btn muted" style="opacity:0.45;pointer-events:none">Next →</span>
+      {{end}}
+    </div>
+  </div>
   {{end}}
 </section>
 {{end}}

@@ -1,4 +1,5 @@
 {{define "executions_table"}}
+<input type="hidden" name="page" value="{{.Pagination.Page}}">
 {{if .Runs}}
 <table>
   <thead>
@@ -14,7 +15,7 @@
   </thead>
   <tbody>
     {{range .Runs}}
-    <tr x-show="query === '' || '{{.SearchKey}}'.includes(query.toLowerCase())">
+    <tr>
       <td class="mono"><a href="/executions/{{.ID}}">{{.ID}}</a></td>
       <td>
         <strong>{{.WorkflowName}}</strong>
@@ -33,5 +34,24 @@
 </table>
 {{else}}
 <div class="empty">No matching executions found.</div>
+{{end}}
+{{if gt .Pagination.Total 0}}
+<div class="card-body toolbar" style="justify-content:space-between;border-top:1px solid var(--border)">
+  <div class="muted mono" style="font-size:12px">
+    Showing {{.Pagination.StartItem}}–{{.Pagination.EndItem}} of {{.Pagination.Total}} · Page {{.Pagination.Page}}/{{.Pagination.TotalPages}}
+  </div>
+  <div class="toolbar">
+    {{if .Pagination.HasPrev}}
+      <a class="btn" href="{{.Pagination.PrevURL}}" hx-get="{{.Pagination.PrevPartialURL}}" hx-target="#executions-body" hx-swap="innerHTML" hx-push-url="{{.Pagination.PrevURL}}">← Prev</a>
+    {{else}}
+      <span class="btn muted" style="opacity:0.45;pointer-events:none">← Prev</span>
+    {{end}}
+    {{if .Pagination.HasNext}}
+      <a class="btn" href="{{.Pagination.NextURL}}" hx-get="{{.Pagination.NextPartialURL}}" hx-target="#executions-body" hx-swap="innerHTML" hx-push-url="{{.Pagination.NextURL}}">Next →</a>
+    {{else}}
+      <span class="btn muted" style="opacity:0.45;pointer-events:none">Next →</span>
+    {{end}}
+  </div>
+</div>
 {{end}}
 {{end}}

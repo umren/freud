@@ -7,27 +7,33 @@
   <span class="badge badge-neutral">Auto-refresh 3s</span>
 </div>
 
-<section class="card" x-data="{ status: '{{.StatusFilter}}', query: '' }">
+<section class="card">
   <div class="card-head">
     <h2 class="card-title">Execution History</h2>
-    <div class="toolbar">
-      <input class="input" type="search" placeholder="Search run ID or flow..." x-model="query">
-      <select class="select" name="status" x-model="status"
+    <form method="get" action="/executions" class="toolbar">
+      <input class="input" type="search" name="q" value="{{.Query}}" placeholder="Search run ID, flow, or user..."
+             hx-get="/partials/executions"
+             hx-include="[name='status'],[name='q']"
+             hx-target="#executions-body"
+             hx-swap="innerHTML"
+             hx-trigger="input changed delay:250ms, search">
+      <select class="select" name="status"
               hx-get="/partials/executions"
+              hx-include="[name='status'],[name='q']"
               hx-target="#executions-body"
               hx-swap="innerHTML">
-        <option value="">All statuses</option>
-        <option value="SUCCESS">SUCCESS</option>
-        <option value="FAILED">FAILED</option>
-        <option value="KILLED">KILLED</option>
-        <option value="RUNNING">RUNNING</option>
+        <option value="" {{if eq .StatusFilter ""}}selected{{end}}>All statuses</option>
+        <option value="SUCCESS" {{if eq .StatusFilter "SUCCESS"}}selected{{end}}>SUCCESS</option>
+        <option value="FAILED" {{if eq .StatusFilter "FAILED"}}selected{{end}}>FAILED</option>
+        <option value="KILLED" {{if eq .StatusFilter "KILLED"}}selected{{end}}>KILLED</option>
+        <option value="RUNNING" {{if eq .StatusFilter "RUNNING"}}selected{{end}}>RUNNING</option>
       </select>
-    </div>
+    </form>
   </div>
 
   <div id="executions-body"
        hx-get="/partials/executions"
-       hx-include="[name='status']"
+       hx-include="[name='status'],[name='q'],[name='page']"
        hx-trigger="every 3s"
        hx-swap="innerHTML">
     {{template "executions_table" .}}

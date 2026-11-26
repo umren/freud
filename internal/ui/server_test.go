@@ -708,6 +708,29 @@ tasks:
 		t.Fatalf("expected /api page with endpoints and token list, got %d", rec.Code)
 	}
 
+	// Verify API pagination (offset & total & has_more) and Web UI pagination across >50 runs.
+	for i := 0; i < 55; i++ {
+		id := fmt.Sprintf("bulk-run-%03d", i)
+		if err := store.CreateRunFull(context.Background(), id, "bulk-flow", "", "", "", "ci"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/executions?q=bulk&limit=10&offset=50", nil)
+	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"total": 55`) || !strings.Contains(rec.Body.String(), `"has_more": false`) {
+		t.Fatalf("unexpected paginated API executions response: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/executions?q=bulk&page=2", nil)
+	req.AddCookie(ciCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Showing 51–55 of 55") || !strings.Contains(rec.Body.String(), "Page 2/2") {
+		t.Fatalf("expected Web UI /executions page 2 summary, got code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
 	// Revoking token immediately invalidates Bearer auth.
 	req = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/tokens/%d", ciTokResp.Meta.ID), nil)
 	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)
