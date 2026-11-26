@@ -700,6 +700,14 @@ tasks:
 		t.Fatalf("expected 200 list_flows on authenticated /mcp, got %d: %s", rec.Code, rec.Body.String())
 	}
 
+	req = httptest.NewRequest(http.MethodGet, "/api", nil)
+	req.AddCookie(ciCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "/api/v1/flows/{file}/run") || !strings.Contains(rec.Body.String(), "ci-runner") {
+		t.Fatalf("expected /api page with endpoints and token list, got %d", rec.Code)
+	}
+
 	// Revoking token immediately invalidates Bearer auth.
 	req = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/tokens/%d", ciTokResp.Meta.ID), nil)
 	req.Header.Set("Authorization", "Bearer "+ciTokResp.Token)

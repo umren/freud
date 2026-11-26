@@ -95,12 +95,13 @@ Start the embedded Web UI (default port `4321`, authentication enabled by defaul
 
 On the very first launch of `./freud dream` (when no admin user exists yet), opening the UI automatically redirects to **`/setup`** in your browser to create the initial `admin` account and password (at least 8 characters). Alternatively, set `FREUD_ADMIN_PASSWORD` to provision the initial admin non-interactively on startup.
 
-The Web UI exposes five pages:
+The Web UI exposes six pages:
 - **Dashboard (`/`)**: execution counts, success rate, upcoming cron runs, and recent executions (auto-refreshes via HTMX).
 - **Flows (`/flows`)**: workflows discovered in `flows/`, cron schedules, SVG task topology, read-only YAML source viewer, and a **Run Now** button to trigger the flow immediately and jump to its live execution page.
 - **Executions (`/executions`)**: newest-to-oldest execution history with status filter, search, who triggered each run, real-time streaming task logs, Gantt timeline, and execution topology.
 - **Includes (`/includes`)**: read-only file browser for `includes/`.
-- **Users & Audit (`/audit`)**: searchable activity audit log (`SETUP_ADMIN`, `LOGIN`, `LOGOUT`, `FLOW_RUN`, `FLOW_KILL`, `USER_CREATED`, `USER_DELETED`, `PASSWORD_CHANGED`), password self-service, and admin user management (all users share the same flow permissions; admins can additionally add/remove users).
+- **API (`/api`)**: built-in REST API v1 & MCP endpoint/parameter reference plus personal Bearer API token creation and revocation.
+- **Users & Audit (`/audit`)**: searchable activity audit log (`SETUP_ADMIN`, `LOGIN`, `LOGOUT`, `FLOW_RUN`, `FLOW_KILL`, `USER_CREATED`, `USER_DELETED`, `PASSWORD_CHANGED`, `TOKEN_CREATED`, `TOKEN_REVOKED`), password self-service, and admin user management (all users share the same flow permissions; admins can additionally add/remove users).
 
 Manage cached dependency images:
 
@@ -241,7 +242,7 @@ tasks:
 
 ### Authentication & API Tokens
 
-* Generate a personal Bearer token (`frd_...`) in the Web UI under **Users & Audit (`/audit`) → API Tokens** or via `POST /api/v1/tokens` (signed in with a browser session cookie or existing token).
+* Generate a personal Bearer token (`frd_...`) in the Web UI under **API (`/api`) → API Tokens** or via `POST /api/v1/tokens` (signed in with a browser session cookie or existing token).
 * Pass the token in the `Authorization` header:
 
 ```bash

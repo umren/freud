@@ -87,6 +87,7 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 		"executions":       {"templates/layout.html", "templates/executions.html", "templates/executions_partial.html"},
 		"execution_detail": {"templates/layout.html", "templates/execution_detail.html", "templates/execution_detail_partial.html", "templates/dag_partial.html"},
 		"includes":         {"templates/layout.html", "templates/includes.html"},
+		"api":              {"templates/layout.html", "templates/api.html"},
 		"audit":            {"templates/layout.html", "templates/audit.html"},
 		"setup":            {"templates/auth_layout.html", "templates/setup.html"},
 		"login":            {"templates/auth_layout.html", "templates/login.html"},
@@ -154,6 +155,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /executions/{id}/kill", s.handleKillExecution)
 	mux.HandleFunc("GET /partials/executions/{id}", s.handleExecutionDetailPartial)
 	mux.HandleFunc("GET /includes", s.handleIncludes)
+	mux.HandleFunc("GET /api", s.handleAPIDocsPage)
 	mux.HandleFunc("GET /audit", s.handleAuditPage)
 	mux.HandleFunc("POST /users", s.handleCreateUser)
 	mux.HandleFunc("POST /users/{username}/delete", s.handleDeleteUser)

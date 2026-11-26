@@ -60,12 +60,10 @@ type apiTokenRowView struct {
 type auditViewData struct {
 	basePageData
 	Users        []userRowView
-	Tokens       []apiTokenRowView
 	AuditLogs    []auditRowView
 	ActionFilter string
 	FlashMsg     string
 	FlashErr     string
-	NewRawToken  string
 }
 
 func userFromRequest(r *http.Request) *db.UserRecord {
@@ -374,10 +372,6 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuditPage(w http.ResponseWriter, r *http.Request) {
-	s.renderAuditWithState(w, r, r.URL.Query().Get("msg"), r.URL.Query().Get("err"), "")
-}
-
-func (s *Server) renderAuditWithState(w http.ResponseWriter, r *http.Request, flashMsg, flashErr, newRawToken string) {
 	actionFilter := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("action")))
 	stats, err := s.store.GetRunStats(r.Context())
 	if err != nil {
@@ -385,16 +379,6 @@ func (s *Server) renderAuditWithState(w http.ResponseWriter, r *http.Request, fl
 		return
 	}
 	usersRaw, err := s.store.ListUsers(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	var tokenOwner string
-	if cur := userFromRequest(r); s.cfg.EnableAuth && cur != nil && !cur.IsAdmin {
-		tokenOwner = cur.Username
-	}
-	tokensRaw, err := s.store.ListAPITokens(r.Context(), tokenOwner)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -412,22 +396,6 @@ func (s *Server) renderAuditWithState(w http.ResponseWriter, r *http.Request, fl
 			Username:  u.Username,
 			IsAdmin:   u.IsAdmin,
 			CreatedAt: formatTimestamp(u.CreatedAt),
-		})
-	}
-
-	tokens := make([]apiTokenRowView, 0, len(tokensRaw))
-	for _, t := range tokensRaw {
-		lastUsed := "Never"
-		if t.LastUsedAt.Valid && t.LastUsedAt.String != "" {
-			lastUsed = formatTimestamp(t.LastUsedAt.String)
-		}
-		tokens = append(tokens, apiTokenRowView{
-			ID:         t.ID,
-			Username:   t.Username,
-			Name:       t.Name,
-			Prefix:     t.Prefix,
-			LastUsedAt: lastUsed,
-			CreatedAt:  formatTimestamp(t.CreatedAt),
 		})
 	}
 
@@ -449,25 +417,23 @@ func (s *Server) renderAuditWithState(w http.ResponseWriter, r *http.Request, fl
 	s.renderPage(w, "audit", auditViewData{
 		basePageData: base,
 		Users:        users,
-		Tokens:       tokens,
 		AuditLogs:    logs,
 		ActionFilter: actionFilter,
-		FlashMsg:     flashMsg,
-		FlashErr:     flashErr,
-		NewRawToken:  newRawToken,
+		FlashMsg:     r.URL.Query().Get("msg"),
+		FlashErr:     r.URL.Query().Get("err"),
 	})
 }
 
 func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	cur := userFromRequest(r)
 	if !s.cfg.EnableAuth || cur == nil {
-		http.Redirect(w, r, "/audit?err="+url.QueryEscape("API tokens require authentication to be enabled"), http.StatusSeeOther)
+		http.Redirect(w, r, "/api?err="+url.QueryEscape("API tokens require authentication to be enabled"), http.StatusSeeOther)
 		return
 	}
 
 	name, err := auth.ValidateTokenName(r.FormValue("name"))
 	if err != nil {
-		http.Redirect(w, r, "/audit?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/api?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 	raw, prefix, hash, err := auth.NewAPIToken()
@@ -476,13 +442,13 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.store.CreateAPIToken(r.Context(), cur.Username, name, prefix, hash); err != nil {
-		http.Redirect(w, r, "/audit?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/api?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 
 	_ = s.store.RecordAudit(r.Context(), cur.Username, "TOKEN_CREATED", name, "dream", "prefix="+prefix)
 	// Render directly so the one-time token never appears in URL query parameters or browser history.
-	s.renderAuditWithState(w, r, fmt.Sprintf("Created API token %q — copy it now, it will not be shown again.", name), "", raw)
+	s.renderAPIPageWithState(w, r, fmt.Sprintf("Created API token %q — copy it now, it will not be shown again.", name), "", raw)
 }
 
 func (s *Server) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
@@ -493,7 +459,7 @@ func (s *Server) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
-		http.Redirect(w, r, "/audit?err="+url.QueryEscape("Invalid token ID"), http.StatusSeeOther)
+		http.Redirect(w, r, "/api?err="+url.QueryEscape("Invalid token ID"), http.StatusSeeOther)
 		return
 	}
 	deleted, err := s.store.DeleteAPIToken(r.Context(), id, cur.Username, cur.IsAdmin)
@@ -502,11 +468,11 @@ func (s *Server) handleDeleteAPIToken(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, sql.ErrNoRows) {
 			msg = "API token not found"
 		}
-		http.Redirect(w, r, "/audit?err="+url.QueryEscape(msg), http.StatusSeeOther)
+		http.Redirect(w, r, "/api?err="+url.QueryEscape(msg), http.StatusSeeOther)
 		return
 	}
 	_ = s.store.RecordAudit(r.Context(), cur.Username, "TOKEN_REVOKED", deleted.Name, "dream", "owner="+deleted.Username)
-	http.Redirect(w, r, "/audit?msg="+url.QueryEscape(fmt.Sprintf("Revoked API token %q", deleted.Name)), http.StatusSeeOther)
+	http.Redirect(w, r, "/api?msg="+url.QueryEscape(fmt.Sprintf("Revoked API token %q", deleted.Name)), http.StatusSeeOther)
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {

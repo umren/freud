@@ -1,0 +1,167 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">API &amp; Tokens</h1>
+    <p class="page-sub">REST API v1 endpoints, MCP HTTP endpoint, parameters, and Bearer API tokens</p>
+  </div>
+</div>
+
+{{if .FlashMsg}}
+<div class="alert-success">{{.FlashMsg}}</div>
+{{end}}
+{{if .NewRawToken}}
+<div class="card" style="margin-bottom:18px;border-color:var(--accent)">
+  <div class="card-head">
+    <h2 class="card-title">New API Token (Shown Once)</h2>
+  </div>
+  <div class="card-body">
+    <div class="muted" style="font-size:12px;margin-bottom:8px">Pass this token in the HTTP header: <span class="mono">Authorization: Bearer &lt;token&gt;</span></div>
+    <pre class="mono" style="margin:0;padding:10px 12px;background:rgba(0,0,0,0.28);border-radius:6px;overflow-x:auto;user-select:all">{{.NewRawToken}}</pre>
+  </div>
+</div>
+{{end}}
+{{if .FlashErr}}
+<div class="alert-error">{{.FlashErr}}</div>
+{{end}}
+
+<section class="card" style="margin-bottom:18px">
+  <div class="card-head">
+    <h2 class="card-title">API Tokens ({{len .Tokens}})</h2>
+    {{if and .AuthEnabled .CurrentUser}}
+    <form method="post" action="/tokens" class="toolbar">
+      <input class="input" type="text" name="name" placeholder="Token label (e.g. github-ci)" required>
+      <button type="submit" class="btn btn-primary">Generate Token</button>
+    </form>
+    {{end}}
+  </div>
+  {{if and .AuthEnabled .CurrentUser}}
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Owner</th>
+        <th>Prefix</th>
+        <th>Last Used</th>
+        <th>Created</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Tokens}}
+      <tr>
+        <td class="mono"><strong>{{.Name}}</strong></td>
+        <td class="mono">{{.Username}}</td>
+        <td class="mono muted">{{.Prefix}}...</td>
+        <td class="mono muted">{{.LastUsedAt}}</td>
+        <td class="mono muted">{{.CreatedAt}}</td>
+        <td style="text-align:right">
+          <form method="post" action="/tokens/{{.ID}}/delete" style="display:inline">
+            <button type="submit" class="btn btn-danger" style="padding:3px 9px;font-size:11px">Revoke</button>
+          </form>
+        </td>
+      </tr>
+      {{else}}
+      <tr><td colspan="6" class="muted">No API tokens created yet. Generate one above to call <span class="mono">/api/v1/*</span> or <span class="mono">/mcp</span>.</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="card-body muted">API tokens require authentication to be enabled (currently running with <span class="mono">--no-auth</span>). Endpoints below accept unauthenticated requests in this mode.</div>
+  {{end}}
+</section>
+
+<section class="card" style="margin-bottom:18px" x-data="{ query: '' }">
+  <div class="card-head">
+    <h2 class="card-title">REST API v1 &amp; MCP Endpoints ({{len .Endpoints}})</h2>
+    <div class="toolbar">
+      <input class="input" type="search" placeholder="Filter method, path, params..." x-model="query">
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Method</th>
+        <th>Path</th>
+        <th>Access</th>
+        <th>Query / Path / JSON Parameters</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Endpoints}}
+      <tr x-show="query === '' || '{{.SearchKey}}'.includes(query.toLowerCase())">
+        <td><span class="badge badge-{{.MethodSlug}} mono">{{.Method}}</span></td>
+        <td class="mono"><strong>{{.Path}}</strong></td>
+        <td><span class="badge badge-{{.AccessSlug}}">{{.Access}}</span></td>
+        <td class="mono muted" style="font-size:12px">{{if .Params}}{{.Params}}{{else}}—{{end}}</td>
+        <td style="font-size:13px">{{.Description}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+
+<div class="grid-2" style="margin-bottom:18px">
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Authentication &amp; Status Codes</h2>
+    </div>
+    <div class="card-body" style="font-size:13px;line-height:1.6">
+      <p style="margin:0 0 10px">All <span class="mono">/api/v1/*</span> endpoints (except <span class="mono">/api/v1/health</span>) and <span class="mono">/mcp</span> accept either a personal Bearer token or an active browser cookie session.</p>
+      <ul style="margin:0;padding-left:18px">
+        <li><span class="mono">Authorization: Bearer frd_&lt;token&gt;</span> — recommended for CI/CD, scripts, and MCP clients</li>
+        <li><span class="mono">401 Unauthorized</span> — missing, invalid, or revoked token/session (<span class="mono">{"error": "..."}</span>)</li>
+        <li><span class="mono">403 Forbidden</span> — admin privileges or token ownership required</li>
+        <li><span class="mono">409 Conflict</span> — initial admin <span class="mono">/setup</span> has not been completed yet</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Quick <span class="mono">curl</span> Examples</h2>
+    </div>
+    <div class="card-body">
+      <pre class="mono" style="margin:0;padding:10px 12px;background:rgba(0,0,0,0.28);border-radius:6px;overflow-x:auto;font-size:12px">export FREUD_TOKEN="frd_your_token"
+
+# Trigger a flow and read execution status
+curl -s -X POST -H "Authorization: Bearer $FREUD_TOKEN" \
+  {{.BaseURL}}/api/v1/flows/etl-example.yaml/run
+
+# Inspect execution &amp; task logs
+curl -s -H "Authorization: Bearer $FREUD_TOKEN" \
+  {{.BaseURL}}/api/v1/executions/&lt;run_id&gt;
+
+# MCP tool discovery over HTTP
+curl -s -X POST -H "Authorization: Bearer $FREUD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  {{.BaseURL}}/mcp</pre>
+    </div>
+  </section>
+</div>
+
+<section class="card">
+  <div class="card-head">
+    <h2 class="card-title">MCP Tools (<span class="mono">POST /mcp</span> &amp; <span class="mono">freud mcp</span>)</h2>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Tool</th>
+        <th>Arguments (JSON)</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .MCPTools}}
+      <tr>
+        <td class="mono"><strong>{{.Name}}</strong></td>
+        <td class="mono muted" style="font-size:12px">{{if .Args}}{{.Args}}{{else}}—{{end}}</td>
+        <td style="font-size:13px">{{.Description}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
