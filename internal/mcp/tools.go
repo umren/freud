@@ -11,6 +11,7 @@ import (
 	"freud/internal/db"
 	"freud/internal/engine"
 	"freud/internal/service"
+	"freud/internal/syncer"
 	"freud/internal/workflow"
 )
 
@@ -151,6 +152,16 @@ func (s *Server) registerTools() {
 			},
 		},
 	}, s.toolListAuditLogs)
+
+	s.registerTool(ToolDefinition{
+		Name:        "sync_flows",
+		Description: "Trigger Git repository sync now to pull updated workflows and includes.",
+		InputSchema: map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{},
+			"additionalProperties": false,
+		},
+	}, s.toolSyncFlows)
 }
 
 func decodeArgs(raw json.RawMessage, dst any) error {
@@ -327,6 +338,26 @@ func (s *Server) toolListAuditLogs(ctx context.Context, raw json.RawMessage) (an
 		return nil, err
 	}
 	return service.ListAuditLogs(ctx, s.store, args.Limit, args.Offset, 50, 200, args.Action, args.Query)
+}
+
+func (s *Server) toolSyncFlows(ctx context.Context, _ json.RawMessage) (any, error) {
+	if s.cfg.Syncer == nil || !s.cfg.Syncer.Enabled() {
+		return nil, fmt.Errorf("git sync is not enabled")
+	}
+	actor := actorFromContext(ctx)
+	res, err := s.cfg.Syncer.Sync(ctx, syncer.Options{
+		Trigger:     "mcp",
+		Actor:       actor.Username,
+		Details:     actor.Details,
+		ForceRecord: true,
+	})
+	if err != nil {
+		if res != nil && res.RunID != "" {
+			return nil, fmt.Errorf("%w (run_id=%s)", err, res.RunID)
+		}
+		return nil, err
+	}
+	return res, nil
 }
 
 func (s *Server) listFlowResources() ([]map[string]any, error) {

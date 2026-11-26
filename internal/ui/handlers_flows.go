@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"freud/internal/cron"
 	"freud/internal/engine"
 	"freud/internal/service"
+	"freud/internal/syncer"
 	"freud/internal/workflow"
 )
 
@@ -35,6 +37,9 @@ type flowsViewData struct {
 	basePageData
 	FlowsDir string
 	Flows    []flowRowView
+	Sync     syncer.Status
+	SyncMsg  string
+	SyncErr  string
 }
 
 type flowDetailItem struct {
@@ -113,11 +118,36 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, row)
 	}
 
+	var syncStatus syncer.Status
+	if s.cfg.Syncer != nil {
+		syncStatus = s.cfg.Syncer.Status()
+	}
+
 	s.renderPage(w, "flows", flowsViewData{
 		basePageData: s.newBaseData(r, "Flows", "flows", stats.Running),
 		FlowsDir:     s.cfg.FlowsDir,
 		Flows:        rows,
+		Sync:         syncStatus,
+		SyncMsg:      r.URL.Query().Get("sync_msg"),
+		SyncErr:      r.URL.Query().Get("sync_err"),
 	})
+}
+
+func (s *Server) handleSyncFlows(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Syncer == nil || !s.cfg.Syncer.Enabled() {
+		http.Redirect(w, r, "/flows?sync_err="+url.QueryEscape("Git sync is not enabled"), http.StatusSeeOther)
+		return
+	}
+	res, err := s.cfg.Syncer.Sync(r.Context(), syncer.Options{
+		Trigger:     "dream",
+		Actor:       s.actorName(r),
+		ForceRecord: true,
+	})
+	if err != nil {
+		http.Redirect(w, r, "/flows?sync_err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/flows?sync_msg="+url.QueryEscape(res.Message), http.StatusSeeOther)
 }
 
 func (s *Server) findFlowEntryResult(fileName string) (*workflow.WorkflowEntry, int, error) {

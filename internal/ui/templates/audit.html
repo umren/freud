@@ -108,6 +108,8 @@
         <option value="PASSWORD_CHANGED" {{if eq .ActionFilter "PASSWORD_CHANGED"}}selected{{end}}>PASSWORD_CHANGED</option>
         <option value="TOKEN_CREATED" {{if eq .ActionFilter "TOKEN_CREATED"}}selected{{end}}>TOKEN_CREATED</option>
         <option value="TOKEN_REVOKED" {{if eq .ActionFilter "TOKEN_REVOKED"}}selected{{end}}>TOKEN_REVOKED</option>
+        <option value="FLOW_SYNC" {{if eq .ActionFilter "FLOW_SYNC"}}selected{{end}}>FLOW_SYNC</option>
+        <option value="FLOW_SYNC_FAILED" {{if eq .ActionFilter "FLOW_SYNC_FAILED"}}selected{{end}}>FLOW_SYNC_FAILED</option>
       </select>
       <button type="submit" class="btn">Filter</button>
     </form>

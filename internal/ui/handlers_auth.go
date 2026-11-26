@@ -110,7 +110,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		p := r.URL.Path
-		if strings.HasPrefix(p, "/static/") || p == "/setup" || p == "/login" || p == "/api/v1/health" {
+		if strings.HasPrefix(p, "/static/") || p == "/setup" || p == "/login" || p == "/api/v1/health" || p == "/webhooks/sync" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -602,9 +602,9 @@ func clientRateKey(r *http.Request, username string) string {
 
 func auditActionSlug(action string) string {
 	switch strings.ToUpper(strings.TrimSpace(action)) {
-	case "FLOW_RUN", "SETUP_ADMIN", "USER_CREATED", "TOKEN_CREATED":
+	case "FLOW_RUN", "SETUP_ADMIN", "USER_CREATED", "TOKEN_CREATED", "FLOW_SYNC":
 		return "success"
-	case "FLOW_KILL", "USER_DELETED", "TOKEN_REVOKED":
+	case "FLOW_KILL", "USER_DELETED", "TOKEN_REVOKED", "FLOW_SYNC_FAILED":
 		return "killed"
 	case "LOGIN", "PASSWORD_CHANGED":
 		return "running"

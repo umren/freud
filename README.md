@@ -134,7 +134,21 @@ no_auth = false
 
 [tui]
 scheduler = false
+
+[sync]
+enabled = false
+repo = "https://github.com/org/workflows.git"
+branch = "main"
+interval = "10m"                   # polling interval (e.g. "10m", or "0s" for webhook/manual only)
+flows_path = ["flows"]             # string or list of repo directories containing .yaml flows
+includes_path = "includes"         # optional repo directory synced into includes_dir
+prune = true                       # remove local YAML/include files deleted in Git
+# token = ""                       # prefer FREUD_SYNC_TOKEN env var for private HTTPS repos
+# ssh_key = "~/.ssh/id_ed25519"    # or FREUD_SYNC_SSH_KEY
+# webhook_secret = ""              # prefer FREUD_SYNC_WEBHOOK_SECRET env var
 ```
+
+Additional environment overrides for `[sync]`: `FREUD_SYNC_ENABLED`, `FREUD_SYNC_REPO`, `FREUD_SYNC_BRANCH`, `FREUD_SYNC_INTERVAL`, `FREUD_SYNC_CACHE_DIR`, `FREUD_SYNC_FLOWS_PATH` (comma-separated), `FREUD_SYNC_INCLUDES_PATH`, `FREUD_SYNC_PRUNE`, `FREUD_SYNC_TOKEN`, `FREUD_SYNC_SSH_KEY`, `FREUD_SYNC_WEBHOOK_SECRET`.
 
 Relative paths inside `freud.toml` are resolved relative to the directory containing `freud.toml`.
 
@@ -323,6 +337,7 @@ Freud embeds a zero-dependency **MCP JSON-RPC 2.0 server** inside the same binar
   - `get_execution` (`{run_id}`) — inspect execution status, `triggered_by`, child subflows, and task logs
   - `kill_execution` (`{run_id}`) — terminate an active `RUNNING` execution
   - `list_audit_logs` (`{action?, q?, limit?, offset?}`) — query paginated activity audit trail
+  - `sync_flows` — trigger Git repository sync now and return commit/diff summary & `run_id`
 - **Resources**:
   - `freud://flows/{file}` (`text/yaml`) via `resources/list` and `resources/read`
 
@@ -354,6 +369,15 @@ curl -s -X POST \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   http://localhost:4321/mcp | jq
 ```
+
+## Git Repository Sync (`[sync]`)
+
+Freud can automatically pull workflow YAML files and shared `includes/` from any Git repository (GitHub, GitLab, Gitea, Bitbucket, self-hosted) using the host `git` binary — on a timer (`interval`), immediately via webhook (`POST /webhooks/sync`), or manually via **Flows → Sync Now**, `POST /api/v1/flows/sync`, and the `sync_flows` MCP tool.
+
+- **Pre-validation before applying:** incoming workflows are validated in a staging directory via `workflow.LoadDir` before updating `flows/`. Invalid YAML or cyclic dependencies are rejected without breaking active schedules or flows.
+- **Nested directories (`flows_path`):** if workflows inside a repository folder are organized in subdirectories (for example `pipelines/billing/daily.yaml`), Freud flattens them safely into `flows/` as `billing__daily.yaml`. Nested subdirectories under `includes_path` are preserved as-is.
+- **Executions & Audit visibility:** whenever new commits arrive, sync fails, or sync is triggered manually/via webhook/API/MCP, a `git-sync` run (`workflow_name: "git-sync"`) is recorded with full git/diff/error logs so it appears directly in **Executions** (Web UI & TUI) alongside `FLOW_SYNC` / `FLOW_SYNC_FAILED` entries in **Users & Audit**.
+- **Webhooks (`POST /webhooks/sync`):** set `FREUD_SYNC_WEBHOOK_SECRET` and point your Git provider push webhook to `https://<host>/webhooks/sync`. Supports `X-Hub-Signature-256` (GitHub), `X-Gitea-Signature` (Gitea), `X-Gitlab-Token` (GitLab), and `Authorization: Bearer <secret>`. Pushes to branches other than `sync.branch` are safely ignored.
 
 ## Database Backends
 

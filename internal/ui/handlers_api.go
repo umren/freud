@@ -13,6 +13,7 @@ import (
 	"freud/internal/auth"
 	"freud/internal/db"
 	"freud/internal/service"
+	"freud/internal/syncer"
 )
 
 type apiErrorResponse struct {
@@ -452,4 +453,83 @@ func (s *Server) handleAPIDeleteToken(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.RecordAudit(r.Context(), cur.Username, "TOKEN_REVOKED", deleted.Name, source, details)
 	writeJSON(w, http.StatusOK, map[string]any{"revoked_id": deleted.ID, "name": deleted.Name})
+}
+
+func (s *Server) handleAPISyncStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.cfg.Syncer == nil {
+		writeJSON(w, http.StatusOK, syncer.Status{Enabled: false})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.cfg.Syncer.Status())
+}
+
+func (s *Server) handleAPISyncFlows(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Syncer == nil || !s.cfg.Syncer.Enabled() {
+		writeAPIError(w, http.StatusBadRequest, "git sync is not enabled")
+		return
+	}
+	_, tokenNote := s.auditSource(r, "api")
+	res, err := s.cfg.Syncer.Sync(r.Context(), syncer.Options{
+		Trigger:     "api",
+		Actor:       s.actorName(r),
+		Details:     tokenNote,
+		ForceRecord: true,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  err.Error(),
+			"result": res,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Syncer == nil || !s.cfg.Syncer.Enabled() {
+		writeAPIError(w, http.StatusNotFound, "git sync is not enabled")
+		return
+	}
+	secret := s.cfg.Syncer.WebhookSecret()
+	if strings.TrimSpace(secret) == "" {
+		writeAPIError(w, http.StatusForbidden, "sync webhook secret is not configured")
+		return
+	}
+
+	defer r.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	branch, ok := syncer.VerifyWebhook(r, body, secret)
+	if !ok {
+		writeAPIError(w, http.StatusUnauthorized, "invalid webhook signature or token")
+		return
+	}
+	targetBranch := s.cfg.Syncer.Status().Branch
+	if branch != "" && !strings.EqualFold(branch, targetBranch) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ignored": true,
+			"reason":  "branch mismatch",
+			"branch":  branch,
+		})
+		return
+	}
+
+	res, err := s.cfg.Syncer.Sync(r.Context(), syncer.Options{
+		Trigger:     "webhook",
+		Actor:       "webhook",
+		Details:     "branch=" + targetBranch,
+		ForceRecord: true,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  err.Error(),
+			"result": res,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }

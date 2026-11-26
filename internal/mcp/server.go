@@ -14,6 +14,7 @@ import (
 
 	"freud/internal/auth"
 	"freud/internal/db"
+	"freud/internal/syncer"
 	"freud/internal/workflow"
 )
 
@@ -33,6 +34,7 @@ type KillableFlowRunner interface {
 type Config struct {
 	FlowsDir string
 	Runner   FlowRunner
+	Syncer   *syncer.Syncer
 	RunCtx   context.Context
 	OnLog    func(format string, args ...any)
 }

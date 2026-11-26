@@ -122,6 +122,8 @@ func buildAPIEndpointDocs() []apiEndpointDoc {
 		{Method: http.MethodGet, Path: "/api/v1/health", Access: "Public", Params: "—", Description: "Server status, auth_enabled, setup_required, and scheduler_on."},
 		{Method: http.MethodGet, Path: "/api/v1/me", Access: "Any user", Params: "—", Description: "Current authenticated user (username, is_admin, created_at)."},
 		{Method: http.MethodGet, Path: "/api/v1/flows", Access: "Any user", Params: "—", Description: "List discovered YAML workflows, cron schedules, and latest run status."},
+		{Method: http.MethodGet, Path: "/api/v1/flows/sync", Access: "Any user", Params: "—", Description: "Current Git sync status, target branch, last commit SHA, and last error."},
+		{Method: http.MethodPost, Path: "/api/v1/flows/sync", Access: "Any user", Params: "—", Description: "Pull updated workflows/includes from configured Git repo immediately."},
 		{Method: http.MethodGet, Path: "/api/v1/flows/{file}", Access: "Any user", Params: "path: file (e.g. etl-example.yaml)", Description: "Flow details, parsed task graph, raw YAML, and recent runs."},
 		{Method: http.MethodPost, Path: "/api/v1/flows/{file}/run", Access: "Any user", Params: "path: file", Description: "Start workflow execution asynchronously (returns 202 with run_id)."},
 		{Method: http.MethodGet, Path: "/api/v1/executions", Access: "Any user", Params: "query: status (RUNNING|SUCCESS|FAILED|KILLED), q, limit (1..200, default 50), offset (>=0)", Description: "Aggregate stats plus paginated execution history newest-first (total, has_more)."},
@@ -134,6 +136,7 @@ func buildAPIEndpointDocs() []apiEndpointDoc {
 		{Method: http.MethodGet, Path: "/api/v1/tokens", Access: "Any user", Params: "—", Description: "List API token metadata (admins see all; members see their own)."},
 		{Method: http.MethodPost, Path: "/api/v1/tokens", Access: "Any user", Params: `body JSON: {"name"}`, Description: "Generate a new frd_... API token (plaintext shown once)."},
 		{Method: http.MethodDelete, Path: "/api/v1/tokens/{id}", Access: "Owner or Admin", Params: "path: id (token ID)", Description: "Revoke an API token immediately."},
+		{Method: http.MethodPost, Path: "/webhooks/sync", Access: "Webhook Secret", Params: "headers: X-Hub-Signature-256 / X-Gitea-Signature / X-Gitlab-Token / Bearer", Description: "Trigger Git sync on push webhooks from GitHub, GitLab, Gitea, etc."},
 		{Method: http.MethodPost, Path: "/mcp", Access: "Any user", Params: `body JSON-RPC 2.0: initialize, tools/list, tools/call, resources/list, resources/read`, Description: "Streamable HTTP MCP server endpoint for remote AI agents."},
 	}
 	for i := range raw {
@@ -153,5 +156,6 @@ func buildMCPToolDocs() []apiMCPToolDoc {
 		{Name: "get_execution", Args: `{"run_id": "..."}`, Description: "Get run details, triggered_by actor, child subflows, and task logs."},
 		{Name: "kill_execution", Args: `{"run_id": "..."}`, Description: "Stop an active RUNNING execution and write FLOW_KILL to audit logs."},
 		{Name: "list_audit_logs", Args: `{"action": "FLOW_RUN", "q": "", "limit": 50, "offset": 0}`, Description: "Inspect paginated user and agent activity audit logs (max 200)."},
+		{Name: "sync_flows", Args: "{}", Description: "Trigger Git repository sync now to pull updated workflows and includes."},
 	}
 }

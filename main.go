@@ -23,6 +23,7 @@ import (
 	"freud/internal/format"
 	"freud/internal/mcp"
 	"freud/internal/runner"
+	"freud/internal/syncer"
 	"freud/internal/term"
 	"freud/internal/tui"
 	"freud/internal/ui"
@@ -305,6 +306,22 @@ func runDreamCmd(args []string) error {
 		}
 	}
 
+	var gitSyncer *syncer.Syncer
+	if cfg.Sync.Enabled {
+		gitSyncer, err = syncer.New(rt.store, cfg)
+		if err != nil {
+			return err
+		}
+		go gitSyncer.RunPeriodic(ctx)
+		st := gitSyncer.Status()
+		fmt.Printf("%s Git sync enabled (%s @ %s, every %s)\n",
+			term.Tag(c, "sync"),
+			term.Key(c, st.Repo),
+			term.Key(c, st.Branch),
+			term.Bold(c, st.Interval),
+		)
+	}
+
 	addr := fmt.Sprintf(":%d", cfg.Dream.Port)
 	uiServer, err := ui.NewServer(rt.store, ui.Config{
 		Addr:        addr,
@@ -313,6 +330,7 @@ func runDreamCmd(args []string) error {
 		SchedulerOn: cfg.Dream.Scheduler,
 		EnableAuth:  enableAuth,
 		Runner:      rt.eng,
+		Syncer:      gitSyncer,
 		RunCtx:      ctx,
 	})
 	if err != nil {
@@ -440,9 +458,18 @@ func runMCPWithIO(args []string, in io.Reader, out io.Writer) error {
 		actorDetails = "token=" + tokRec.Name
 	}
 
+	var gitSyncer *syncer.Syncer
+	if cfg.Sync.Enabled {
+		gitSyncer, err = syncer.New(rt.store, cfg)
+		if err != nil {
+			return err
+		}
+	}
+
 	mcpSrv := mcp.NewServer(rt.store, mcp.Config{
 		FlowsDir: cfg.FlowsDir,
 		Runner:   rt.eng,
+		Syncer:   gitSyncer,
 		RunCtx:   ctx,
 		OnLog: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "[mcp] "+format+"\n", args...)

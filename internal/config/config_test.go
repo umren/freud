@@ -127,3 +127,48 @@ func TestLoadValidationErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncConfigTOMLAndEnvOverrides(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "freud.toml")
+	tomlData := `
+[sync]
+enabled = true
+repo = "https://github.com/acme/workflows.git"
+flows_path = "pipelines"
+includes_path = "shared"
+prune = true
+cache_dir = "./sync-cache"
+ssh_key = "./keys/id_ed25519"
+`
+	if err := os.WriteFile(cfgPath, []byte(tomlData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(Overrides{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("Load single flows_path: %v", err)
+	}
+	if !cfg.Sync.Enabled || len(cfg.Sync.FlowsPath) != 1 || cfg.Sync.FlowsPath[0] != "pipelines" || cfg.Sync.Branch != DefaultSyncBranch || cfg.Sync.Interval != DefaultSyncInterval || !cfg.Sync.Prune {
+		t.Fatalf("unexpected sync config: %+v", cfg.Sync)
+	}
+	if cfg.Sync.CacheDir != filepath.Join(tmp, "sync-cache") || cfg.Sync.SSHKey != filepath.Join(tmp, "keys", "id_ed25519") {
+		t.Fatalf("expected relative sync paths resolved, got cache=%q ssh=%q", cfg.Sync.CacheDir, cfg.Sync.SSHKey)
+	}
+
+	t.Setenv("FREUD_SYNC_FLOWS_PATH", "team-a/flows, team-b/flows")
+	t.Setenv("FREUD_SYNC_TOKEN", "pat-123")
+	t.Setenv("FREUD_SYNC_INTERVAL", "5m")
+	cfg2, err := Load(Overrides{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("Load env overrides: %v", err)
+	}
+	if len(cfg2.Sync.FlowsPath) != 2 || cfg2.Sync.FlowsPath[0] != "team-a/flows" || cfg2.Sync.FlowsPath[1] != "team-b/flows" || cfg2.Sync.Token != "pat-123" || cfg2.Sync.Interval != "5m" {
+		t.Fatalf("unexpected sync env overrides: %+v", cfg2.Sync)
+	}
+
+	t.Setenv("FREUD_SYNC_FLOWS_PATH", "../outside")
+	if _, err := Load(Overrides{ConfigPath: cfgPath}); err == nil {
+		t.Fatal("expected error for escaping sync.flows_path")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -21,7 +22,42 @@ const (
 	DefaultFlowsDir      = "flows"
 	DefaultIncludesDir   = "includes"
 	DefaultDreamPort     = 4321
+	DefaultSyncBranch    = "main"
+	DefaultSyncInterval  = "10m"
+	DefaultSyncCacheDir  = ".freud-sync"
 )
+
+// StringList accepts either a single TOML string or a string array.
+type StringList []string
+
+// UnmarshalTOML decodes either a string or slice of strings into StringList.
+func (s *StringList) UnmarshalTOML(data any) error {
+	switch v := data.(type) {
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed != "" {
+			*s = StringList{trimmed}
+		} else {
+			*s = nil
+		}
+		return nil
+	case []any:
+		out := make(StringList, 0, len(v))
+		for _, item := range v {
+			str, ok := item.(string)
+			if !ok {
+				return fmt.Errorf("expected string element in flows_path, got %T", item)
+			}
+			if trimmed := strings.TrimSpace(str); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		*s = out
+		return nil
+	default:
+		return fmt.Errorf("expected string or string array, got %T", data)
+	}
+}
 
 // DreamConfig configures the embedded web UI server.
 type DreamConfig struct {
@@ -33,6 +69,21 @@ type DreamConfig struct {
 // TUIConfig configures the interactive terminal UI.
 type TUIConfig struct {
 	Scheduler bool `toml:"scheduler"`
+}
+
+// SyncConfig configures Git repository flow synchronization.
+type SyncConfig struct {
+	Enabled       bool       `toml:"enabled"`
+	Repo          string     `toml:"repo"`
+	Branch        string     `toml:"branch"`
+	Interval      string     `toml:"interval"`
+	CacheDir      string     `toml:"cache_dir"`
+	FlowsPath     StringList `toml:"flows_path"`
+	IncludesPath  string     `toml:"includes_path"`
+	Prune         bool       `toml:"prune"`
+	Token         string     `toml:"token"`
+	SSHKey        string     `toml:"ssh_key"`
+	WebhookSecret string     `toml:"webhook_secret"`
 }
 
 // Config holds runtime paths and behavior settings for Freud.
@@ -47,6 +98,7 @@ type Config struct {
 	NoCache          bool        `toml:"no_cache"`
 	Dream            DreamConfig `toml:"dream"`
 	TUI              TUIConfig   `toml:"tui"`
+	Sync             SyncConfig  `toml:"sync"`
 }
 
 // Overrides carries optional explicitly-passed CLI flag overrides.
@@ -72,6 +124,12 @@ func Default() Config {
 		IncludesDir:   DefaultIncludesDir,
 		Dream: DreamConfig{
 			Port: DefaultDreamPort,
+		},
+		Sync: SyncConfig{
+			Branch:    DefaultSyncBranch,
+			Interval:  DefaultSyncInterval,
+			CacheDir:  DefaultSyncCacheDir,
+			FlowsPath: StringList{DefaultFlowsDir},
 		},
 	}
 }
@@ -122,6 +180,48 @@ func (c Config) Validate() error {
 	}
 	if c.Dream.Port <= 0 || c.Dream.Port > 65535 {
 		return fmt.Errorf("invalid port %d", c.Dream.Port)
+	}
+	if c.Sync.Enabled {
+		if strings.TrimSpace(c.Sync.Repo) == "" {
+			return fmt.Errorf("sync.repo cannot be empty when sync is enabled")
+		}
+		if strings.TrimSpace(c.Sync.Branch) == "" {
+			return fmt.Errorf("sync.branch cannot be empty when sync is enabled")
+		}
+		if iv := strings.TrimSpace(c.Sync.Interval); iv != "" {
+			d, err := time.ParseDuration(iv)
+			if err != nil {
+				return fmt.Errorf("invalid sync.interval %q: %w", iv, err)
+			}
+			if d < 0 {
+				return fmt.Errorf("sync.interval must be >= 0 (got %q)", iv)
+			}
+		}
+		for _, p := range c.Sync.FlowsPath {
+			if err := validateRepoRelPath("sync.flows_path", p); err != nil {
+				return err
+			}
+		}
+		if strings.TrimSpace(c.Sync.IncludesPath) != "" {
+			if err := validateRepoRelPath("sync.includes_path", c.Sync.IncludesPath); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateRepoRelPath(field, raw string) error {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return fmt.Errorf("%s entry cannot be empty", field)
+	}
+	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\") {
+		return fmt.Errorf("%s %q must be a relative path inside the repository", field, raw)
+	}
+	clean := filepath.ToSlash(filepath.Clean(p))
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return fmt.Errorf("%s %q cannot traverse outside the repository", field, raw)
 	}
 	return nil
 }
@@ -200,6 +300,12 @@ func applyTOMLFile(cfg *Config, path string) error {
 	if md.IsDefined("env_file") {
 		cfg.EnvFile = resolveRel(cfg.EnvFile, false)
 	}
+	if md.IsDefined("sync", "cache_dir") {
+		cfg.Sync.CacheDir = resolveRel(cfg.Sync.CacheDir, false)
+	}
+	if md.IsDefined("sync", "ssh_key") {
+		cfg.Sync.SSHKey = resolveRel(cfg.Sync.SSHKey, false)
+	}
 	return nil
 }
 
@@ -248,6 +354,54 @@ func applyEnvVars(cfg *Config) error {
 			return fmt.Errorf("invalid FREUD_NO_AUTH %q: %w", v, err)
 		}
 		cfg.Dream.NoAuth = b
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_ENABLED")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid FREUD_SYNC_ENABLED %q: %w", v, err)
+		}
+		cfg.Sync.Enabled = b
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_REPO")); v != "" {
+		cfg.Sync.Repo = v
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_BRANCH")); v != "" {
+		cfg.Sync.Branch = v
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_INTERVAL")); v != "" {
+		cfg.Sync.Interval = v
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_CACHE_DIR")); v != "" {
+		cfg.Sync.CacheDir = v
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_FLOWS_PATH")); v != "" {
+		parts := strings.Split(v, ",")
+		list := make(StringList, 0, len(parts))
+		for _, part := range parts {
+			if p := strings.TrimSpace(part); p != "" {
+				list = append(list, p)
+			}
+		}
+		cfg.Sync.FlowsPath = list
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_INCLUDES_PATH")); v != "" {
+		cfg.Sync.IncludesPath = v
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_PRUNE")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid FREUD_SYNC_PRUNE %q: %w", v, err)
+		}
+		cfg.Sync.Prune = b
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_TOKEN")); v != "" {
+		cfg.Sync.Token = v
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_SSH_KEY")); v != "" {
+		cfg.Sync.SSHKey = v
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_WEBHOOK_SECRET")); v != "" {
+		cfg.Sync.WebhookSecret = v
 	}
 	return nil
 }

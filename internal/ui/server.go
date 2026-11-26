@@ -13,6 +13,7 @@ import (
 	"freud/internal/auth"
 	"freud/internal/db"
 	"freud/internal/mcp"
+	"freud/internal/syncer"
 	"freud/internal/workflow"
 )
 
@@ -37,6 +38,7 @@ type Config struct {
 	SchedulerOn bool
 	EnableAuth  bool
 	Runner      AsyncFlowRunner
+	Syncer      *syncer.Syncer
 	RunCtx      context.Context
 }
 
@@ -127,6 +129,7 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 		mcpSrv: mcp.NewServer(store, mcp.Config{
 			FlowsDir: cfg.FlowsDir,
 			Runner:   cfg.Runner,
+			Syncer:   cfg.Syncer,
 			RunCtx:   runCtx,
 		}),
 		pages:     pages,
@@ -147,6 +150,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
 	mux.HandleFunc("GET /partials/dashboard", s.handleDashboardPartial)
 	mux.HandleFunc("GET /flows", s.handleFlows)
+	mux.HandleFunc("POST /flows/sync", s.handleSyncFlows)
 	mux.HandleFunc("GET /flows/{file}", s.handleFlowDetail)
 	mux.HandleFunc("POST /flows/{file}/run", s.handleRunFlow)
 	mux.HandleFunc("GET /executions", s.handleExecutions)
@@ -167,6 +171,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/health", s.handleAPIHealth)
 	mux.HandleFunc("GET /api/v1/me", s.handleAPIMe)
 	mux.HandleFunc("GET /api/v1/flows", s.handleAPIFlows)
+	mux.HandleFunc("GET /api/v1/flows/sync", s.handleAPISyncStatus)
+	mux.HandleFunc("POST /api/v1/flows/sync", s.handleAPISyncFlows)
 	mux.HandleFunc("GET /api/v1/flows/{file}", s.handleAPIFlowDetail)
 	mux.HandleFunc("POST /api/v1/flows/{file}/run", s.handleAPIRunFlow)
 	mux.HandleFunc("GET /api/v1/executions", s.handleAPIExecutions)
@@ -179,6 +185,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tokens", s.handleAPITokensList)
 	mux.HandleFunc("POST /api/v1/tokens", s.handleAPICreateToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.handleAPIDeleteToken)
+	mux.HandleFunc("POST /webhooks/sync", s.handleSyncWebhook)
 	mux.HandleFunc("/mcp", s.handleMCP)
 	return s.authMiddleware(mux)
 }

@@ -2,18 +2,24 @@ package ui
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"freud/internal/config"
 	"freud/internal/db"
 	"freud/internal/engine"
+	"freud/internal/syncer"
 	"freud/internal/workflow"
 )
 
@@ -746,5 +752,136 @@ tasks:
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 after token revoked, got %d", rec.Code)
+	}
+}
+
+func runGitCmdForTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Freud Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Freud Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
+	}
+}
+
+func TestUIAndWebhookGitSync(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+
+	tmp := t.TempDir()
+	bareRepo := filepath.Join(tmp, "remote.git")
+	workRepo := filepath.Join(tmp, "work")
+	flowsDir := filepath.Join(tmp, "flows")
+	includesDir := filepath.Join(tmp, "includes")
+
+	runGitCmdForTest(t, tmp, "init", "--bare", bareRepo)
+	runGitCmdForTest(t, tmp, "clone", bareRepo, workRepo)
+	runGitCmdForTest(t, workRepo, "checkout", "-b", "main")
+	if err := os.MkdirAll(filepath.Join(workRepo, "flows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	flowYAML := "name: synced-flow\ntasks:\n  - id: s1\n    runtime: python\n    script: print(1)\n"
+	if err := os.WriteFile(filepath.Join(workRepo, "flows", "synced.yaml"), []byte(flowYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmdForTest(t, workRepo, "add", "-A")
+	runGitCmdForTest(t, workRepo, "commit", "-m", "add synced flow")
+	runGitCmdForTest(t, workRepo, "push", "-u", "origin", "main")
+
+	store, err := db.Open(filepath.Join(tmp, "uisync.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := config.Default()
+	cfg.FlowsDir = flowsDir
+	cfg.IncludesDir = includesDir
+	cfg.Sync = config.SyncConfig{
+		Enabled:       true,
+		Repo:          bareRepo,
+		Branch:        "main",
+		Interval:      "10m",
+		CacheDir:      filepath.Join(tmp, "cache"),
+		FlowsPath:     config.StringList{"flows"},
+		WebhookSecret: "hook-secret-123",
+	}
+	gitSyncer, err := syncer.New(store, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := NewServer(store, Config{
+		FlowsDir:    flowsDir,
+		IncludesDir: includesDir,
+		EnableAuth:  false,
+		Syncer:      gitSyncer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	// 1. /flows renders Git Sync card and Sync Now button.
+	req := httptest.NewRequest(http.MethodGet, "/flows", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Git Sync") || !strings.Contains(rec.Body.String(), "/flows/sync") {
+		t.Fatalf("expected Git Sync card on /flows, code=%d", rec.Code)
+	}
+
+	// 2. Reject invalid webhook signature with 401.
+	req = httptest.NewRequest(http.MethodPost, "/webhooks/sync", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req.Header.Set("X-Hub-Signature-256", "sha256=deadbeef")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on bad webhook signature, got %d", rec.Code)
+	}
+
+	// 3. Non-target branch webhook is safely ignored with 200.
+	otherBody := []byte(`{"ref":"refs/heads/feature"}`)
+	macOther := hmac.New(sha256.New, []byte("hook-secret-123"))
+	_, _ = macOther.Write(otherBody)
+	req = httptest.NewRequest(http.MethodPost, "/webhooks/sync", strings.NewReader(string(otherBody)))
+	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(macOther.Sum(nil)))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ignored": true`) {
+		t.Fatalf("expected ignored response for non-target branch, code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 4. Valid GitHub webhook pulls flow and creates a git-sync execution + audit entry.
+	mainBody := []byte(`{"ref":"refs/heads/main"}`)
+	macMain := hmac.New(sha256.New, []byte("hook-secret-123"))
+	_, _ = macMain.Write(mainBody)
+	req = httptest.NewRequest(http.MethodPost, "/webhooks/sync", strings.NewReader(string(mainBody)))
+	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(macMain.Sum(nil)))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"changed": true`) || !strings.Contains(rec.Body.String(), `"synced.yaml"`) {
+		t.Fatalf("expected webhook sync success, code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 5. GET /api/v1/flows/sync and POST /flows/sync work.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/flows/sync", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"webhook_enabled": true`) {
+		t.Fatalf("unexpected /api/v1/flows/sync status: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/flows/sync", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(rec.Header().Get("Location"), "/flows?sync_msg=") {
+		t.Fatalf("expected redirect with sync_msg after POST /flows/sync, got %d %q", rec.Code, rec.Header().Get("Location"))
 	}
 }

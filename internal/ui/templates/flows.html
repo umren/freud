@@ -6,6 +6,43 @@
   </div>
 </div>
 
+{{if .SyncMsg}}
+<div class="alert-success">{{.SyncMsg}}</div>
+{{end}}
+{{if .SyncErr}}
+<div class="alert-error">{{.SyncErr}}</div>
+{{end}}
+
+{{if .Sync.Enabled}}
+<section class="card" style="margin-bottom:18px">
+  <div class="card-head">
+    <h2 class="card-title">Git Sync (<span class="mono">{{.Sync.Branch}}</span>)</h2>
+    <form method="post" action="/flows/sync" style="margin:0">
+      <button type="submit" class="btn btn-primary">Sync Now</button>
+    </form>
+  </div>
+  <div class="card-body toolbar" style="justify-content:space-between;flex-wrap:wrap;gap:12px;font-size:12px">
+    <div>
+      <span class="muted">Repo:</span> <span class="mono"><strong>{{.Sync.Repo}}</strong></span>
+      {{if .Sync.Interval}} · <span class="muted">Interval:</span> <span class="mono">{{.Sync.Interval}}</span>{{end}}
+      {{if .Sync.WebhookEnabled}} · <span class="badge badge-accent">Webhook</span>{{end}}
+      {{if .Sync.Prune}} · <span class="badge badge-neutral">Prune</span>{{end}}
+    </div>
+    <div>
+      {{if .Sync.LastCommit}}
+        <span class="muted">HEAD:</span> <span class="mono">{{printf "%.12s" .Sync.LastCommit}}</span>
+      {{end}}
+      {{if .Sync.LastRunID}}
+        · <a href="/executions/{{.Sync.LastRunID}}" class="mono">Last sync run →</a>
+      {{end}}
+      {{if .Sync.LastError}}
+        · <span class="badge badge-failed">{{.Sync.LastError}}</span>
+      {{end}}
+    </div>
+  </div>
+</section>
+{{end}}
+
 <section class="card" x-data="{ q: '' }">
   <div class="card-head">
     <h2 class="card-title">Registered Flows ({{len .Flows}})</h2>
