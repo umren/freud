@@ -39,6 +39,7 @@ type apiTokenView struct {
 	ID         int64  `json:"id"`
 	Username   string `json:"username"`
 	Name       string `json:"name"`
+	Scope      string `json:"scope"`
 	Prefix     string `json:"prefix"`
 	LastUsedAt string `json:"last_used_at,omitempty"`
 	CreatedAt  string `json:"created_at"`
@@ -138,6 +139,64 @@ func (s *Server) handleAPIFlows(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"flows": flows})
 }
 
+func (s *Server) requireAPIScope(w http.ResponseWriter, r *http.Request, requiredScope string) bool {
+	if !s.cfg.EnableAuth {
+		return true
+	}
+	if tok := apiTokenFromRequest(r); tok != nil {
+		if !auth.ScopeAllows(tok.Scope, requiredScope) {
+			writeAPIError(w, http.StatusForbidden, fmt.Sprintf("token scope %q does not allow %s operations", tok.Scope, requiredScope))
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) writeBlockReason() string {
+	if !s.cfg.AgentMadness {
+		return "agent_madness is disabled in config"
+	}
+	if s.cfg.Syncer != nil && s.cfg.Syncer.Enabled() {
+		return "git sync is enabled; modify flows and includes in the upstream repository"
+	}
+	return ""
+}
+
+func (s *Server) authorizeAgentMadnessWrite(w http.ResponseWriter, r *http.Request) bool {
+	if !s.cfg.AgentMadness {
+		writeAPIError(w, http.StatusForbidden, "agent_madness is disabled in config")
+		return false
+	}
+	if s.cfg.Syncer != nil && s.cfg.Syncer.Enabled() {
+		writeAPIError(w, http.StatusConflict, "flows and includes are managed by Git sync; modify them in the upstream repository")
+		return false
+	}
+	if s.cfg.EnableAuth {
+		cur := userFromRequest(r)
+		if cur == nil || !cur.IsAdmin {
+			writeAPIError(w, http.StatusForbidden, "admin privileges required")
+			return false
+		}
+		if !s.requireAPIScope(w, r, auth.TokenScopeWrite) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) recordAPIAudit(r *http.Request, action, target, extra string) {
+	source, tokenNote := s.auditSource(r, "api")
+	details := strings.TrimSpace(extra)
+	if tokenNote != "" {
+		if details != "" {
+			details += ", " + tokenNote
+		} else {
+			details = tokenNote
+		}
+	}
+	_ = s.store.RecordAudit(r.Context(), s.actorName(r), action, target, source, details)
+}
+
 func (s *Server) handleAPIFlowDetail(w http.ResponseWriter, r *http.Request) {
 	detail, err := service.GetFlowDetail(r.Context(), s.store, s.cfg.FlowsDir, r.PathValue("file"), false, 20)
 	if err != nil {
@@ -147,7 +206,58 @@ func (s *Server) handleAPIFlowDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, detail)
 }
 
+func (s *Server) handleAPISaveFlow(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAgentMadnessWrite(w, r) {
+		return
+	}
+	var req struct {
+		YAML string `json:"yaml"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+		return
+	}
+	created, cleanName, wf, err := service.SaveFlow(s.cfg.FlowsDir, r.PathValue("file"), req.YAML)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	verb := "updated"
+	status := http.StatusOK
+	if created {
+		verb = "created"
+		status = http.StatusCreated
+	}
+	s.recordAPIAudit(r, "FLOW_SAVED", cleanName, fmt.Sprintf("action=%s, workflow=%s", verb, wf.Name))
+	writeJSON(w, status, map[string]any{
+		"file":        cleanName,
+		"name":        wf.Name,
+		"cron":        wf.Cron,
+		"tasks_count": len(wf.Tasks),
+		"created":     created,
+	})
+}
+
+func (s *Server) handleAPIDeleteFlow(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAgentMadnessWrite(w, r) {
+		return
+	}
+	cleanName, err := service.DeleteFlow(s.cfg.FlowsDir, r.PathValue("file"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	s.recordAPIAudit(r, "FLOW_DELETED", cleanName, "")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"file":    cleanName,
+	})
+}
+
 func (s *Server) handleAPIRunFlow(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIScope(w, r, auth.TokenScopeRun) {
+		return
+	}
 	matched, code, err := s.findFlowEntryResult(r.PathValue("file"))
 	if err != nil {
 		writeAPIError(w, code, err.Error())
@@ -199,6 +309,9 @@ func (s *Server) handleAPIExecutionDetail(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleAPIKillExecution(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIScope(w, r, auth.TokenScopeRun) {
+		return
+	}
 	runID := r.PathValue("id")
 	source, tokenNote := s.auditSource(r, "api")
 	code, err := s.killRunByID(r.Context(), runID, s.actorName(r), source, tokenNote)
@@ -258,6 +371,9 @@ func (s *Server) handleAPICreateUser(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusForbidden, "admin privileges required")
 		return
 	}
+	if !s.requireAPIScope(w, r, auth.TokenScopeWrite) {
+		return
+	}
 
 	var req struct {
 		Username string `json:"username"`
@@ -314,6 +430,9 @@ func (s *Server) handleAPIDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusForbidden, "admin privileges required")
 		return
 	}
+	if !s.requireAPIScope(w, r, auth.TokenScopeWrite) {
+		return
+	}
 
 	target := strings.TrimSpace(r.PathValue("username"))
 	if cur != nil && target == cur.Username {
@@ -362,6 +481,7 @@ func (s *Server) handleAPITokensList(w http.ResponseWriter, r *http.Request) {
 			ID:         tok.ID,
 			Username:   tok.Username,
 			Name:       tok.Name,
+			Scope:      tok.Scope,
 			Prefix:     tok.Prefix,
 			LastUsedAt: tok.LastUsedAt.String,
 			CreatedAt:  tok.CreatedAt,
@@ -380,9 +500,13 @@ func (s *Server) handleAPICreateToken(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	if !s.requireAPIScope(w, r, auth.TokenScopeWrite) {
+		return
+	}
 
 	var req struct {
-		Name string `json:"name"`
+		Name  string `json:"name"`
+		Scope string `json:"scope"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
@@ -393,20 +517,33 @@ func (s *Server) handleAPICreateToken(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	scope := strings.TrimSpace(req.Scope)
+	if scope == "" {
+		scope = auth.TokenScopeRun
+	}
+	scope, err = auth.ValidateTokenScope(scope)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	raw, prefix, hash, err := auth.NewAPIToken()
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	rec, err := s.store.CreateAPIToken(r.Context(), cur.Username, name, prefix, hash)
+	rec, err := s.store.CreateAPITokenWithScope(r.Context(), cur.Username, name, prefix, hash, scope)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	source, _ := s.auditSource(r, "api")
-	_ = s.store.RecordAudit(r.Context(), cur.Username, "TOKEN_CREATED", name, source, "prefix="+prefix)
+	source, tokenNote := s.auditSource(r, "api")
+	details := "scope=" + scope + ", prefix=" + prefix
+	if tokenNote != "" {
+		details += ", " + tokenNote
+	}
+	_ = s.store.RecordAudit(r.Context(), cur.Username, "TOKEN_CREATED", name, source, details)
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"token": raw,
@@ -414,6 +551,7 @@ func (s *Server) handleAPICreateToken(w http.ResponseWriter, r *http.Request) {
 			ID:        rec.ID,
 			Username:  rec.Username,
 			Name:      rec.Name,
+			Scope:     rec.Scope,
 			Prefix:    rec.Prefix,
 			CreatedAt: rec.CreatedAt,
 		},
@@ -428,6 +566,9 @@ func (s *Server) handleAPIDeleteToken(w http.ResponseWriter, r *http.Request) {
 	cur := userFromRequest(r)
 	if cur == nil {
 		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !s.requireAPIScope(w, r, auth.TokenScopeWrite) {
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -467,6 +608,9 @@ func (s *Server) handleAPISyncStatus(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleAPISyncFlows(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIScope(w, r, auth.TokenScopeRun) {
+		return
+	}
 	if s.cfg.Syncer == nil || !s.cfg.Syncer.Enabled() {
 		writeAPIError(w, http.StatusBadRequest, "git sync is not enabled")
 		return
@@ -556,6 +700,9 @@ func (s *Server) handleAPIMaintenanceCleanup(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusForbidden, "admin privileges required")
 		return
 	}
+	if !s.requireAPIScope(w, r, auth.TokenScopeWrite) {
+		return
+	}
 	if s.maint == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "maintenance service is not configured")
 		return
@@ -605,12 +752,19 @@ func (s *Server) handleAPIContext(w http.ResponseWriter, r *http.Request) {
 		syncStatus = s.cfg.Syncer.Status()
 	}
 
+	blockReason := s.writeBlockReason()
+	writable := blockReason == ""
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"env_keys":           envKeys,
 		"flows_count":        len(flows),
 		"includes_count":     len(includes),
 		"scheduler_on":       s.cfg.SchedulerOn,
 		"auth_enabled":       s.cfg.EnableAuth,
+		"agent_madness":      s.cfg.AgentMadness,
+		"writable_flows":     writable,
+		"writable_includes":  writable,
+		"write_block_reason": blockReason,
 		"sync":               syncStatus,
 		"supported_runtimes": []string{workflow.RuntimePython, workflow.RuntimeJS, workflow.RuntimeShell},
 		"workflow_spec_url":  "/api/v1/spec",
@@ -633,6 +787,52 @@ func (s *Server) handleAPIIncludeDetail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, inc)
+}
+
+func (s *Server) handleAPISaveInclude(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAgentMadnessWrite(w, r) {
+		return
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+		return
+	}
+	created, cleanPath, size, err := service.SaveInclude(s.cfg.IncludesDir, r.PathValue("path"), req.Content)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	verb := "updated"
+	status := http.StatusOK
+	if created {
+		verb = "created"
+		status = http.StatusCreated
+	}
+	s.recordAPIAudit(r, "INCLUDE_SAVED", cleanPath, fmt.Sprintf("action=%s, bytes=%d", verb, size))
+	writeJSON(w, status, map[string]any{
+		"path":    cleanPath,
+		"size":    size,
+		"created": created,
+	})
+}
+
+func (s *Server) handleAPIDeleteInclude(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAgentMadnessWrite(w, r) {
+		return
+	}
+	cleanPath, err := service.DeleteInclude(s.cfg.IncludesDir, r.PathValue("path"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	s.recordAPIAudit(r, "INCLUDE_DELETED", cleanPath, "")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"path":    cleanPath,
+	})
 }
 
 func (s *Server) handleAPIValidateFlow(w http.ResponseWriter, r *http.Request) {

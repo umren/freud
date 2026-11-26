@@ -37,13 +37,14 @@ type EnvKeyLister interface {
 
 // Config configures the Freud MCP server.
 type Config struct {
-	FlowsDir    string
-	IncludesDir string
-	Runner      FlowRunner
-	Syncer      *syncer.Syncer
-	EnvKeys     []string
-	RunCtx      context.Context
-	OnLog       func(format string, args ...any)
+	FlowsDir     string
+	IncludesDir  string
+	Runner       FlowRunner
+	Syncer       *syncer.Syncer
+	AgentMadness bool
+	EnvKeys      []string
+	RunCtx       context.Context
+	OnLog        func(format string, args ...any)
 }
 
 type actorCtxKey string
@@ -54,13 +55,25 @@ const mcpActorCtxKey actorCtxKey = "freud_mcp_actor"
 type Actor struct {
 	Username string
 	Details  string
+	IsAdmin  bool
+	Scope    string
+	HasToken bool
 }
 
 // WithActor binds an authenticated MCP actor and optional details (e.g. "token=ci") to ctx.
+// Assumes local/full privileges; use WithAuth when enforcing RBAC and token scopes.
 func WithActor(ctx context.Context, username, details string) context.Context {
+	return WithAuth(ctx, username, details, true, auth.TokenScopeWrite, false)
+}
+
+// WithAuth binds an authenticated MCP actor together with RBAC and API token scope metadata.
+func WithAuth(ctx context.Context, username, details string, isAdmin bool, scope string, hasToken bool) context.Context {
 	return context.WithValue(ctx, mcpActorCtxKey, Actor{
 		Username: strings.TrimSpace(username),
 		Details:  strings.TrimSpace(details),
+		IsAdmin:  isAdmin,
+		Scope:    strings.TrimSpace(scope),
+		HasToken: hasToken,
 	})
 }
 
@@ -70,7 +83,13 @@ func actorFromContext(ctx context.Context) Actor {
 			return a
 		}
 	}
-	return Actor{Username: auth.LocalActor(), Details: "stdio"}
+	return Actor{
+		Username: auth.LocalActor(),
+		Details:  "stdio",
+		IsAdmin:  true,
+		Scope:    auth.TokenScopeWrite,
+		HasToken: false,
+	}
 }
 
 // Server implements Model Context Protocol (MCP) JSON-RPC 2.0 over stdio and Streamable HTTP.

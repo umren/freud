@@ -576,7 +576,7 @@ tasks:
 	}
 
 	// 3. Create an admin API token via POST /api/v1/tokens (using session cookie).
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"admin-cli"}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"admin-cli","scope":"write"}`))
 	req.AddCookie(adminCookie)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -632,7 +632,7 @@ tasks:
 	}
 
 	// Create a second token via API for 'ci' so we can capture raw value cleanly in JSON.
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"ci-json"}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"ci-json","scope":"write"}`))
 	req.AddCookie(ciCookie)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -1110,5 +1110,222 @@ func TestAgentContextIncludesAndSpecAPI(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), `"valid": false`) {
 		t.Fatalf("expected 422 invalid flow draft, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAgentMadnessAndTokenScopesAPI(t *testing.T) {
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	includesDir := filepath.Join(tmp, "includes")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(includesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	baseYAML := "name: base\ntasks:\n  - id: s1\n    runtime: python\n    script: print(1)\n"
+	if err := os.WriteFile(filepath.Join(flowsDir, "base.yaml"), []byte(baseYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := db.Open(filepath.Join(tmp, "madness_api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	hash, err := auth.HashPassword("secret123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateUser(context.Background(), "alice", hash, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateUser(context.Background(), "bob", hash, false); err != nil {
+		t.Fatal(err)
+	}
+
+	issueToken := func(username, name, scope string) string {
+		raw, prefix, h, err := auth.NewAPIToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.CreateAPITokenWithScope(context.Background(), username, name, prefix, h, scope); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	aliceRead := issueToken("alice", "alice-read", auth.TokenScopeRead)
+	aliceRun := issueToken("alice", "alice-run", auth.TokenScopeRun)
+	aliceWrite := issueToken("alice", "alice-write", auth.TokenScopeWrite)
+	bobWrite := issueToken("bob", "bob-write", auth.TokenScopeWrite)
+
+	doReq := func(h http.Handler, method, target, token, body string) *httptest.ResponseRecorder {
+		var rBody *strings.Reader
+		if body != "" {
+			rBody = strings.NewReader(body)
+		} else {
+			rBody = strings.NewReader("")
+		}
+		req := httptest.NewRequest(method, target, rBody)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. agent_madness=false by default: writes denied with 403.
+	srvOff, err := NewServer(store, Config{
+		FlowsDir:    flowsDir,
+		IncludesDir: includesDir,
+		EnableAuth:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doReq(srvOff.Handler(), http.MethodGet, "/api/v1/context", aliceRead, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"agent_madness": false`) || !strings.Contains(rec.Body.String(), `"writable_flows": false`) {
+		t.Fatalf("unexpected context when agent_madness=false: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, tc := range []struct{ m, p, b string }{
+		{http.MethodPut, "/api/v1/flows/new.yaml", `{"yaml":"name: x\ntasks:\n  - id: a\n    runtime: python\n    script: print(1)"}`},
+		{http.MethodDelete, "/api/v1/flows/base.yaml", ""},
+		{http.MethodPut, "/api/v1/includes/a.py", `{"content":"x=1"}`},
+		{http.MethodDelete, "/api/v1/includes/a.py", ""},
+	} {
+		rec = doReq(srvOff.Handler(), tc.m, tc.p, aliceWrite, tc.b)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for %s %s with agent_madness=false, got %d: %s", tc.m, tc.p, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 2. Git sync enabled: writes blocked with 409 Conflict even when agent_madness=true.
+	syncCfg := config.Default()
+	syncCfg.FlowsDir = flowsDir
+	syncCfg.IncludesDir = includesDir
+	syncCfg.Sync = config.SyncConfig{
+		Enabled: true,
+		Repo:    filepath.Join(tmp, "repo.git"),
+		Branch:  "main",
+	}
+	gitSyncer, err := syncer.New(store, syncCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvSync, err := NewServer(store, Config{
+		FlowsDir:     flowsDir,
+		IncludesDir:  includesDir,
+		EnableAuth:   true,
+		AgentMadness: true,
+		Syncer:       gitSyncer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = doReq(srvSync.Handler(), http.MethodPut, "/api/v1/flows/new.yaml", aliceWrite, `{"yaml":"name: x\ntasks:\n  - id: a\n    runtime: python\n    script: print(1)"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict when git sync is active, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = doReq(srvSync.Handler(), http.MethodPut, "/api/v1/includes/a.py", aliceWrite, `{"content":"x=1"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict on include when git sync is active, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 3. agent_madness=true without Git sync: verify scopes, admin RBAC, REST + HTTP MCP CRUD, audit.
+	runner := &mockAsyncRunner{store: store}
+	srvOn, err := NewServer(store, Config{
+		FlowsDir:     flowsDir,
+		IncludesDir:  includesDir,
+		EnableAuth:   true,
+		AgentMadness: true,
+		Runner:       runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srvOn.Wait)
+	h := srvOn.Handler()
+
+	// Scopes check:
+	if rec := doReq(h, http.MethodGet, "/api/v1/tokens", aliceRead, ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"scope": "read"`) {
+		t.Fatalf("expected GET /api/v1/tokens with scope, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(h, http.MethodPost, "/api/v1/flows/base.yaml/run", aliceRead, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected read token blocked from /run with 403, got %d", rec.Code)
+	}
+	if rec := doReq(h, http.MethodPost, "/api/v1/flows/base.yaml/run", aliceRun, ""); rec.Code != http.StatusAccepted {
+		t.Fatalf("expected run token allowed on /run with 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(h, http.MethodPost, "/api/v1/tokens", aliceRun, `{"name":"extra","scope":"read"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected run token blocked from creating tokens via API with 403, got %d", rec.Code)
+	}
+	if rec := doReq(h, http.MethodPut, "/api/v1/flows/x.yaml", aliceRun, `{"yaml":"name: x\ntasks:\n  - id: a\n    runtime: python\n    script: print(1)"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected run token blocked from PUT flow with 403, got %d", rec.Code)
+	}
+	if rec := doReq(h, http.MethodPost, "/api/v1/tokens", aliceWrite, `{"name":"scoped-check","scope":"read"}`); rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"scope": "read"`) {
+		t.Fatalf("expected write token to issue read token, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Non-admin with write token must still get 403.
+	if rec := doReq(h, http.MethodPut, "/api/v1/flows/bob.yaml", bobWrite, `{"yaml":"name: bob\ntasks:\n  - id: a\n    runtime: python\n    script: print(1)"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected non-admin write token 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Invalid YAML rejected with 400 and does not touch disk.
+	if rec := doReq(h, http.MethodPut, "/api/v1/flows/bad.yaml", aliceWrite, `{"yaml":"name: bad\ntasks: []"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid YAML save, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Flow create -> update -> read -> delete
+	flowPayload := `{"yaml":"name: created-via-api\ntasks:\n  - id: a\n    runtime: python\n    script: print(1)\n"}`
+	if rec := doReq(h, http.MethodPut, "/api/v1/flows/created.yaml", aliceWrite, flowPayload); rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 on PUT flow create, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(h, http.MethodPut, "/api/v1/flows/created.yaml", aliceWrite, flowPayload); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on PUT flow update, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(h, http.MethodGet, "/api/v1/flows/created.yaml", aliceRead, ""); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on GET created flow, got %d", rec.Code)
+	}
+	if rec := doReq(h, http.MethodDelete, "/api/v1/flows/created.yaml", aliceWrite, ""); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on DELETE flow, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Include create -> update -> read -> delete
+	if rec := doReq(h, http.MethodPut, "/api/v1/includes/sub/helper.py", aliceWrite, `{"content":"VAL = 1\n"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 on PUT include create, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(h, http.MethodPut, "/api/v1/includes/sub/helper.py", aliceWrite, `{"content":"VAL = 2\n"}`); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on PUT include update, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(h, http.MethodGet, "/api/v1/includes/sub/helper.py", aliceRead, ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "VAL = 2") {
+		t.Fatalf("expected updated include content, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(h, http.MethodDelete, "/api/v1/includes/sub/helper.py", aliceWrite, ""); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on DELETE include, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(h, http.MethodGet, "/api/v1/includes/sub/helper.py", aliceRead, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after DELETE include, got %d", rec.Code)
+	}
+
+	// HTTP /mcp honors scopes & agent_madness too.
+	mcpSaveBody := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"save_include","arguments":{"path":"via_mcp.py","content":"X=1"}}}`
+	compact := func(s string) string { return strings.ReplaceAll(s, " ", "") }
+	rec = doReq(h, http.MethodPost, "/mcp", aliceRead, mcpSaveBody)
+	if rec.Code != http.StatusOK || !strings.Contains(compact(rec.Body.String()), `"isError":true`) {
+		t.Fatalf("expected HTTP MCP save_include with read token to return tool error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = doReq(h, http.MethodPost, "/mcp", aliceWrite, mcpSaveBody)
+	if rec.Code != http.StatusOK || strings.Contains(compact(rec.Body.String()), `"isError":true`) {
+		t.Fatalf("expected HTTP MCP save_include with admin write token to succeed, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	for _, action := range []string{"FLOW_SAVED", "FLOW_DELETED", "INCLUDE_SAVED", "INCLUDE_DELETED"} {
+		logs, _, err := store.ListAuditLogsPage(context.Background(), db.AuditQuery{Action: action, Limit: 10})
+		if err != nil || len(logs) == 0 {
+			t.Fatalf("expected audit log entry for %s, err=%v len=%d", action, err, len(logs))
+		}
 	}
 }

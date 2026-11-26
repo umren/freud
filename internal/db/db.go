@@ -315,6 +315,7 @@ func (s *Store) migrate() error {
 	name TEXT NOT NULL,
 	prefix TEXT NOT NULL,
 	token_hash TEXT NOT NULL UNIQUE,
+	scope TEXT NOT NULL DEFAULT 'run',
 	last_used_at TEXT,
 	created_at TEXT NOT NULL
 )`,
@@ -346,6 +347,7 @@ func (s *Store) migrate() error {
 		{"runs", "triggered_by", "TEXT"},
 		{"task_runs", "runtime", "TEXT"},
 		{"task_runs", "image", "TEXT"},
+		{"api_tokens", "scope", "TEXT NOT NULL DEFAULT 'run'"},
 	}
 	for _, alt := range alterations {
 		if s.dialect == DialectPostgres {
@@ -420,6 +422,7 @@ func (s *Store) migrateMySQL() error {
 	name VARCHAR(128) NOT NULL,
 	prefix VARCHAR(32) NOT NULL,
 	token_hash VARCHAR(128) NOT NULL UNIQUE,
+	scope VARCHAR(32) NOT NULL DEFAULT 'run',
 	last_used_at VARCHAR(64),
 	created_at VARCHAR(64) NOT NULL,
 	INDEX idx_api_tokens_username (username)
@@ -448,6 +451,7 @@ func (s *Store) migrateMySQL() error {
 		{"runs", "triggered_by", "VARCHAR(128)"},
 		{"task_runs", "runtime", "VARCHAR(64)"},
 		{"task_runs", "image", "VARCHAR(255)"},
+		{"api_tokens", "scope", "VARCHAR(32) NOT NULL DEFAULT 'run'"},
 	}
 	for _, alt := range alterations {
 		var cnt int

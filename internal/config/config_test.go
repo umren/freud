@@ -205,6 +205,15 @@ vacuum_sqlite = true
 	if cfg2.Retention.RunsDays != 14 || cfg2.Retention.VacuumSQLite {
 		t.Fatalf("unexpected env retention overrides: %+v", cfg2.Retention)
 	}
+	if cfg2.AgentMadness || cfg2.Sync.Enabled {
+		t.Fatalf("expected agent_madness and sync.enabled false by default")
+	}
+
+	t.Setenv("FREUD_AGENT_MADNESS", "true")
+	cfg3, err := Load(Overrides{ConfigPath: cfgPath})
+	if err != nil || !cfg3.AgentMadness {
+		t.Fatalf("expected FREUD_AGENT_MADNESS=true override, got %v err=%v", cfg3.AgentMadness, err)
+	}
 
 	t.Setenv("FREUD_RETENTION_RUNS_DAYS", "-5")
 	if _, err := Load(Overrides{ConfigPath: cfgPath}); err == nil {

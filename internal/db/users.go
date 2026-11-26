@@ -43,6 +43,7 @@ type APITokenRecord struct {
 	Name       string
 	Prefix     string
 	TokenHash  string
+	Scope      string
 	LastUsedAt sql.NullString
 	CreatedAt  string
 }
@@ -310,13 +311,22 @@ func (s *Store) ListAuditLogsPage(ctx context.Context, q AuditQuery) ([]AuditLog
 	return logs, total, nil
 }
 
-// CreateAPIToken persists a hashed API token belonging to username.
+// CreateAPIToken persists a hashed API token belonging to username with the default "run" scope.
 func (s *Store) CreateAPIToken(ctx context.Context, username, name, prefix, tokenHash string) (*APITokenRecord, error) {
+	return s.CreateAPITokenWithScope(ctx, username, name, prefix, tokenHash, "run")
+}
+
+// CreateAPITokenWithScope persists a hashed API token with an explicit permission scope ("read", "run", or "write").
+func (s *Store) CreateAPITokenWithScope(ctx context.Context, username, name, prefix, tokenHash, scope string) (*APITokenRecord, error) {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" {
+		scope = "run"
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(
 		ctx,
-		s.rebind(`INSERT INTO api_tokens (username, name, prefix, token_hash, created_at) VALUES (?, ?, ?, ?, ?)`),
-		strings.TrimSpace(username), strings.TrimSpace(name), prefix, tokenHash, now,
+		s.rebind(`INSERT INTO api_tokens (username, name, prefix, token_hash, scope, created_at) VALUES (?, ?, ?, ?, ?, ?)`),
+		strings.TrimSpace(username), strings.TrimSpace(name), prefix, tokenHash, scope, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create api token: %w", err)
@@ -325,9 +335,9 @@ func (s *Store) CreateAPIToken(ctx context.Context, username, name, prefix, toke
 	var rec APITokenRecord
 	err = s.db.QueryRowContext(
 		ctx,
-		s.rebind(`SELECT id, username, name, prefix, token_hash, last_used_at, created_at FROM api_tokens WHERE token_hash = ?`),
+		s.rebind(`SELECT id, username, name, prefix, token_hash, COALESCE(scope, 'run'), last_used_at, created_at FROM api_tokens WHERE token_hash = ?`),
 		tokenHash,
-	).Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.LastUsedAt, &rec.CreatedAt)
+	).Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.Scope, &rec.LastUsedAt, &rec.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("load created api token: %w", err)
 	}
@@ -336,7 +346,7 @@ func (s *Store) CreateAPIToken(ctx context.Context, username, name, prefix, toke
 
 // ListAPITokens returns stored API token metadata ordered newest-first; empty username lists all tokens.
 func (s *Store) ListAPITokens(ctx context.Context, username string) ([]APITokenRecord, error) {
-	query := `SELECT id, username, name, prefix, token_hash, last_used_at, created_at FROM api_tokens`
+	query := `SELECT id, username, name, prefix, token_hash, COALESCE(scope, 'run'), last_used_at, created_at FROM api_tokens`
 	var args []any
 	if u := strings.TrimSpace(username); u != "" {
 		query += ` WHERE username = ?`
@@ -353,7 +363,7 @@ func (s *Store) ListAPITokens(ctx context.Context, username string) ([]APITokenR
 	var tokens []APITokenRecord
 	for rows.Next() {
 		var rec APITokenRecord
-		if err := rows.Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.LastUsedAt, &rec.CreatedAt); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.Scope, &rec.LastUsedAt, &rec.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan api token: %w", err)
 		}
 		tokens = append(tokens, rec)
@@ -366,9 +376,9 @@ func (s *Store) GetUserByAPITokenHash(ctx context.Context, tokenHash string) (*U
 	var rec APITokenRecord
 	err := s.db.QueryRowContext(
 		ctx,
-		s.rebind(`SELECT id, username, name, prefix, token_hash, last_used_at, created_at FROM api_tokens WHERE token_hash = ?`),
+		s.rebind(`SELECT id, username, name, prefix, token_hash, COALESCE(scope, 'run'), last_used_at, created_at FROM api_tokens WHERE token_hash = ?`),
 		tokenHash,
-	).Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.LastUsedAt, &rec.CreatedAt)
+	).Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.Scope, &rec.LastUsedAt, &rec.CreatedAt)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get api token: %w", err)
 	}
@@ -389,9 +399,9 @@ func (s *Store) DeleteAPIToken(ctx context.Context, id int64, actorUsername stri
 	var rec APITokenRecord
 	err := s.db.QueryRowContext(
 		ctx,
-		s.rebind(`SELECT id, username, name, prefix, token_hash, last_used_at, created_at FROM api_tokens WHERE id = ?`),
+		s.rebind(`SELECT id, username, name, prefix, token_hash, COALESCE(scope, 'run'), last_used_at, created_at FROM api_tokens WHERE id = ?`),
 		id,
-	).Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.LastUsedAt, &rec.CreatedAt)
+	).Scan(&rec.ID, &rec.Username, &rec.Name, &rec.Prefix, &rec.TokenHash, &rec.Scope, &rec.LastUsedAt, &rec.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

@@ -128,4 +128,81 @@ tasks:
 	if err != nil || !errors.Is(err, nil) || incData.Path != "sub/helper.py" || len(incData.Content) == 0 {
 		t.Fatalf("unexpected ReadInclude: %+v err=%v", incData, err)
 	}
+
+	// Write & delete helpers for agent_madness mode.
+	if _, _, _, err := SaveFlow(flowsDir, "../evil.yaml", validYAML); !errors.Is(err, ErrInvalidFlow) {
+		t.Fatalf("expected ErrInvalidFlow on traversal filename, got %v", err)
+	}
+	if _, _, _, err := SaveFlow(flowsDir, "bad.yaml", "name: bad\ntasks: []"); !errors.Is(err, ErrInvalidFlow) {
+		t.Fatalf("expected ErrInvalidFlow on invalid YAML, got %v", err)
+	}
+	created, cleanName, wf, err := SaveFlow(flowsDir, "created.yaml", validYAML)
+	if err != nil || !created || cleanName != "created.yaml" || wf.Name != "sample-flow" {
+		t.Fatalf("SaveFlow create failed: created=%v clean=%q wf=%+v err=%v", created, cleanName, wf, err)
+	}
+	created2, _, _, err := SaveFlow(flowsDir, "created.yaml", validYAML)
+	if err != nil || created2 {
+		t.Fatalf("expected SaveFlow update created=false, got created=%v err=%v", created2, err)
+	}
+	if _, err := DeleteFlow(flowsDir, "created.yaml"); err != nil {
+		t.Fatalf("DeleteFlow failed: %v", err)
+	}
+	if _, err := DeleteFlow(flowsDir, "created.yaml"); !errors.Is(err, ErrFlowNotFound) {
+		t.Fatalf("expected ErrFlowNotFound on second delete, got %v", err)
+	}
+
+	if _, _, _, err := SaveInclude(incDir, ".env", "SECRET=1"); !errors.Is(err, ErrInvalidInclude) {
+		t.Fatalf("expected hidden dot file rejected in includes, got %v", err)
+	}
+	incCreated, incPath, _, err := SaveInclude(incDir, "includes/nested/mod.py", "X = 42\n")
+	if err != nil || !incCreated || incPath != "nested/mod.py" {
+		t.Fatalf("SaveInclude create failed: created=%v path=%q err=%v", incCreated, incPath, err)
+	}
+	if _, err := DeleteInclude(incDir, "nested/mod.py"); err != nil {
+		t.Fatalf("DeleteInclude failed: %v", err)
+	}
+
+	// Symlink escape checks for flows and includes.
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("TOP_SECRET"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(incDir, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(incDir, "link.py")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(flowsDir, "escape.yaml")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ReadInclude(incDir, "escape/secret.txt"); !errors.Is(err, ErrInvalidInclude) {
+		t.Fatalf("expected ErrInvalidInclude reading through symlink dir, got %v", err)
+	}
+	if _, _, _, err := SaveInclude(incDir, "escape/new.txt", "pwned"); !errors.Is(err, ErrInvalidInclude) {
+		t.Fatalf("expected ErrInvalidInclude writing through symlink dir, got %v", err)
+	}
+	if _, _, _, err := SaveInclude(incDir, "link.py", "pwned"); !errors.Is(err, ErrInvalidInclude) {
+		t.Fatalf("expected ErrInvalidInclude overwriting symlink file, got %v", err)
+	}
+	if _, err := DeleteInclude(incDir, "escape/secret.txt"); !errors.Is(err, ErrInvalidInclude) {
+		t.Fatalf("expected ErrInvalidInclude deleting through symlink dir, got %v", err)
+	}
+	if _, err := DeleteInclude(incDir, "link.py"); !errors.Is(err, ErrInvalidInclude) {
+		t.Fatalf("expected ErrInvalidInclude deleting symlink file, got %v", err)
+	}
+	if _, _, _, err := SaveFlow(flowsDir, "escape.yaml", validYAML); !errors.Is(err, ErrInvalidFlow) {
+		t.Fatalf("expected ErrInvalidFlow overwriting symlink flow, got %v", err)
+	}
+	if _, err := DeleteFlow(flowsDir, "escape.yaml"); !errors.Is(err, ErrInvalidFlow) {
+		t.Fatalf("expected ErrInvalidFlow deleting symlink flow, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("outside/new.txt must not be created")
+	}
+	if data, err := os.ReadFile(outsideFile); err != nil || string(data) != "TOP_SECRET" {
+		t.Fatalf("outsideFile was modified or removed: data=%q err=%v", string(data), err)
+	}
 }

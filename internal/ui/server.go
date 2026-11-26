@@ -34,15 +34,16 @@ type KillableFlowRunner interface {
 
 // Config configures the embedded web UI server.
 type Config struct {
-	Addr        string
-	FlowsDir    string
-	IncludesDir string
-	SchedulerOn bool
-	EnableAuth  bool
-	Runner      AsyncFlowRunner
-	Syncer      *syncer.Syncer
-	Maintenance *maintenance.Service
-	RunCtx      context.Context
+	Addr         string
+	FlowsDir     string
+	IncludesDir  string
+	SchedulerOn  bool
+	EnableAuth   bool
+	AgentMadness bool
+	Runner       AsyncFlowRunner
+	Syncer       *syncer.Syncer
+	Maintenance  *maintenance.Service
+	RunCtx       context.Context
 }
 
 // Server serves the embedded Freud web UI over HTTP.
@@ -141,11 +142,12 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 		limiter: auth.NewLoginLimiter(10, 5*time.Minute),
 		maint:   maintSvc,
 		mcpSrv: mcp.NewServer(store, mcp.Config{
-			FlowsDir:    cfg.FlowsDir,
-			IncludesDir: cfg.IncludesDir,
-			Runner:      cfg.Runner,
-			Syncer:      cfg.Syncer,
-			RunCtx:      runCtx,
+			FlowsDir:     cfg.FlowsDir,
+			IncludesDir:  cfg.IncludesDir,
+			Runner:       cfg.Runner,
+			Syncer:       cfg.Syncer,
+			AgentMadness: cfg.AgentMadness,
+			RunCtx:       runCtx,
 		}),
 		pages:     pages,
 		partials:  partials,
@@ -197,9 +199,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/flows/sync", s.handleAPISyncStatus)
 	mux.HandleFunc("POST /api/v1/flows/sync", s.handleAPISyncFlows)
 	mux.HandleFunc("GET /api/v1/flows/{file}", s.handleAPIFlowDetail)
+	mux.HandleFunc("PUT /api/v1/flows/{file}", s.handleAPISaveFlow)
+	mux.HandleFunc("DELETE /api/v1/flows/{file}", s.handleAPIDeleteFlow)
 	mux.HandleFunc("POST /api/v1/flows/{file}/run", s.handleAPIRunFlow)
 	mux.HandleFunc("GET /api/v1/includes", s.handleAPIIncludesList)
 	mux.HandleFunc("GET /api/v1/includes/{path...}", s.handleAPIIncludeDetail)
+	mux.HandleFunc("PUT /api/v1/includes/{path...}", s.handleAPISaveInclude)
+	mux.HandleFunc("DELETE /api/v1/includes/{path...}", s.handleAPIDeleteInclude)
 	mux.HandleFunc("GET /api/v1/executions", s.handleAPIExecutions)
 	mux.HandleFunc("GET /api/v1/executions/{id}", s.handleAPIExecutionDetail)
 	mux.HandleFunc("POST /api/v1/executions/{id}/kill", s.handleAPIKillExecution)
@@ -219,7 +225,15 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	_, tokNote := s.auditSource(r, "http")
-	ctx := mcp.WithActor(r.Context(), s.actorName(r), tokNote)
+	u := userFromRequest(r)
+	isAdmin := !s.cfg.EnableAuth || (u != nil && u.IsAdmin)
+	scope := ""
+	hasToken := false
+	if tok := apiTokenFromRequest(r); tok != nil {
+		hasToken = true
+		scope = tok.Scope
+	}
+	ctx := mcp.WithAuth(r.Context(), s.actorName(r), tokNote, isAdmin, scope, hasToken)
 	s.mcpSrv.ServeHTTP(w, r.WithContext(ctx))
 }
 

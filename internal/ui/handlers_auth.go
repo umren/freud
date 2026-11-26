@@ -52,6 +52,7 @@ type apiTokenRowView struct {
 	ID         int64
 	Username   string
 	Name       string
+	Scope      string
 	Prefix     string
 	LastUsedAt string
 	CreatedAt  string
@@ -470,17 +471,26 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/api?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
+	scope := strings.TrimSpace(r.FormValue("scope"))
+	if scope == "" {
+		scope = auth.TokenScopeRun
+	}
+	scope, err = auth.ValidateTokenScope(scope)
+	if err != nil {
+		http.Redirect(w, r, "/api?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
 	raw, prefix, hash, err := auth.NewAPIToken()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if _, err := s.store.CreateAPIToken(r.Context(), cur.Username, name, prefix, hash); err != nil {
+	if _, err := s.store.CreateAPITokenWithScope(r.Context(), cur.Username, name, prefix, hash, scope); err != nil {
 		http.Redirect(w, r, "/api?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 
-	_ = s.store.RecordAudit(r.Context(), cur.Username, "TOKEN_CREATED", name, "dream", "prefix="+prefix)
+	_ = s.store.RecordAudit(r.Context(), cur.Username, "TOKEN_CREATED", name, "dream", "scope="+scope+", prefix="+prefix)
 	// Render directly so the one-time token never appears in URL query parameters or browser history.
 	s.renderAPIPageWithState(w, r, fmt.Sprintf("Created API token %q — copy it now, it will not be shown again.", name), "", raw)
 }
@@ -602,9 +612,9 @@ func clientRateKey(r *http.Request, username string) string {
 
 func auditActionSlug(action string) string {
 	switch strings.ToUpper(strings.TrimSpace(action)) {
-	case "FLOW_RUN", "SETUP_ADMIN", "USER_CREATED", "TOKEN_CREATED", "FLOW_SYNC", "RETENTION_CLEANUP":
+	case "FLOW_RUN", "SETUP_ADMIN", "USER_CREATED", "TOKEN_CREATED", "FLOW_SYNC", "RETENTION_CLEANUP", "FLOW_SAVED", "INCLUDE_SAVED":
 		return "success"
-	case "FLOW_KILL", "USER_DELETED", "TOKEN_REVOKED", "FLOW_SYNC_FAILED", "CACHE_CLEARED":
+	case "FLOW_KILL", "USER_DELETED", "TOKEN_REVOKED", "FLOW_SYNC_FAILED", "CACHE_CLEARED", "FLOW_DELETED", "INCLUDE_DELETED":
 		return "killed"
 	case "LOGIN", "PASSWORD_CHANGED", "RETENTION_UPDATED":
 		return "running"

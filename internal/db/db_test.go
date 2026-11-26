@@ -380,12 +380,12 @@ func runStoreUsersAndAuditChecks(t *testing.T, store *Store) {
 	}
 
 	// API tokens: create, resolve, update last_used_at, list, revoke, and cascade on user delete.
-	tokRec, err := store.CreateAPIToken(ctx, "alice", "alice-ci", "frd_alice", "sha256-alice-1")
-	if err != nil || tokRec.Name != "alice-ci" {
-		t.Fatalf("CreateAPIToken: %+v err=%v", tokRec, err)
+	tokRec, err := store.CreateAPITokenWithScope(ctx, "alice", "alice-ci", "frd_alice", "sha256-alice-1", "write")
+	if err != nil || tokRec.Name != "alice-ci" || tokRec.Scope != "write" {
+		t.Fatalf("CreateAPITokenWithScope: %+v err=%v", tokRec, err)
 	}
 	tokUser, loadedTok, err := store.GetUserByAPITokenHash(ctx, "sha256-alice-1")
-	if err != nil || tokUser.Username != "alice" || !loadedTok.LastUsedAt.Valid {
+	if err != nil || tokUser.Username != "alice" || loadedTok.Scope != "write" || !loadedTok.LastUsedAt.Valid {
 		t.Fatalf("GetUserByAPITokenHash: user=%+v tok=%+v err=%v", tokUser, loadedTok, err)
 	}
 	aliceTokens, err := store.ListAPITokens(ctx, "alice")

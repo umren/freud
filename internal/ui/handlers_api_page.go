@@ -65,6 +65,7 @@ func (s *Server) renderAPIPageWithState(w http.ResponseWriter, r *http.Request, 
 			ID:         t.ID,
 			Username:   t.Username,
 			Name:       t.Name,
+			Scope:      t.Scope,
 			Prefix:     t.Prefix,
 			LastUsedAt: lastUsed,
 			CreatedAt:  formatTimestamp(t.CreatedAt),
@@ -99,6 +100,8 @@ func methodSlug(method string) string {
 		return "running"
 	case http.MethodPost:
 		return "success"
+	case http.MethodPut:
+		return "accent"
 	case http.MethodDelete:
 		return "killed"
 	default:
@@ -121,26 +124,30 @@ func buildAPIEndpointDocs() []apiEndpointDoc {
 	raw := []apiEndpointDoc{
 		{Method: http.MethodGet, Path: "/api/v1/health", Access: "Public", Params: "—", Description: "Server status, auth_enabled, setup_required, and scheduler_on."},
 		{Method: http.MethodGet, Path: "/api/v1/me", Access: "Any user", Params: "—", Description: "Current authenticated user (username, is_admin, created_at)."},
-		{Method: http.MethodGet, Path: "/api/v1/context", Access: "Any user", Params: "—", Description: "Agent overview: available .env variable names (no values), flows/includes counts, scheduler, and Git sync status."},
+		{Method: http.MethodGet, Path: "/api/v1/context", Access: "Any user", Params: "—", Description: "Agent overview: available .env variable names (no values), flows/includes counts, scheduler, agent_madness, and Git sync status."},
 		{Method: http.MethodGet, Path: "/api/v1/spec", Access: "Any user", Params: "query: format=raw (returns text/markdown)", Description: "Canonical workflow YAML specification and supported container runtimes."},
 		{Method: http.MethodGet, Path: "/api/v1/flows", Access: "Any user", Params: "—", Description: "List discovered YAML workflows, cron schedules, and latest run status."},
 		{Method: http.MethodPost, Path: "/api/v1/flows/validate", Access: "Any user", Params: `body JSON: {"yaml"}`, Description: "Validate a workflow YAML draft without writing files to disk."},
 		{Method: http.MethodGet, Path: "/api/v1/flows/sync", Access: "Any user", Params: "—", Description: "Current Git sync status, target branch, last commit SHA, and last error."},
-		{Method: http.MethodPost, Path: "/api/v1/flows/sync", Access: "Any user", Params: "—", Description: "Pull updated workflows/includes from configured Git repo immediately."},
+		{Method: http.MethodPost, Path: "/api/v1/flows/sync", Access: "run scope", Params: "—", Description: "Pull updated workflows/includes from configured Git repo immediately."},
 		{Method: http.MethodGet, Path: "/api/v1/flows/{file}", Access: "Any user", Params: "path: file (e.g. etl-example.yaml)", Description: "Flow details, parsed task graph, raw YAML, and recent runs."},
-		{Method: http.MethodPost, Path: "/api/v1/flows/{file}/run", Access: "Any user", Params: "path: file", Description: "Start workflow execution asynchronously (returns 202 with run_id)."},
+		{Method: http.MethodPut, Path: "/api/v1/flows/{file}", Access: "Admin only", Params: `path: file, body JSON: {"yaml"}`, Description: "Create or update a validated workflow YAML file (requires agent_madness=true, write scope, Git sync off)."},
+		{Method: http.MethodDelete, Path: "/api/v1/flows/{file}", Access: "Admin only", Params: "path: file", Description: "Delete a workflow YAML file (requires agent_madness=true, write scope, Git sync off)."},
+		{Method: http.MethodPost, Path: "/api/v1/flows/{file}/run", Access: "run scope", Params: "path: file", Description: "Start workflow execution asynchronously (returns 202 with run_id)."},
 		{Method: http.MethodGet, Path: "/api/v1/includes", Access: "Any user", Params: "—", Description: "List shared helper files in includes/."},
 		{Method: http.MethodGet, Path: "/api/v1/includes/{path}", Access: "Any user", Params: "path: relative include path (e.g. payload_utils.py)", Description: "Read a shared include file safely (max 512 KiB)."},
+		{Method: http.MethodPut, Path: "/api/v1/includes/{path}", Access: "Admin only", Params: `path: relative path, body JSON: {"content"}`, Description: "Create or update a file inside includes/ up to 512 KiB (requires agent_madness=true, write scope, Git sync off)."},
+		{Method: http.MethodDelete, Path: "/api/v1/includes/{path}", Access: "Admin only", Params: "path: relative include path", Description: "Delete a file from includes/ (requires agent_madness=true, write scope, Git sync off)."},
 		{Method: http.MethodGet, Path: "/api/v1/executions", Access: "Any user", Params: "query: status (RUNNING|SUCCESS|FAILED|KILLED), q, limit (1..200, default 50), offset (>=0)", Description: "Aggregate stats plus paginated execution history newest-first (total, has_more)."},
 		{Method: http.MethodGet, Path: "/api/v1/executions/{id}", Access: "Any user", Params: "path: id (run_id), query: tail_lines (>0 truncates logs)", Description: "Run metadata, child subflow runs, and task runs including logs and exit codes."},
-		{Method: http.MethodPost, Path: "/api/v1/executions/{id}/kill", Access: "Any user", Params: "path: id (run_id)", Description: "Terminate an active RUNNING execution and record FLOW_KILL in audit log."},
+		{Method: http.MethodPost, Path: "/api/v1/executions/{id}/kill", Access: "run scope", Params: "path: id (run_id)", Description: "Terminate an active RUNNING execution and record FLOW_KILL in audit log."},
 		{Method: http.MethodGet, Path: "/api/v1/audit", Access: "Any user", Params: "query: action, q, limit (1..500, default 100), offset (>=0)", Description: "Paginated user and agent audit log entries across Dream UI, API, MCP, TUI, and CLI."},
 		{Method: http.MethodGet, Path: "/api/v1/users", Access: "Any user", Params: "—", Description: "List registered user accounts (usernames and admin flags, no password hashes)."},
-		{Method: http.MethodPost, Path: "/api/v1/users", Access: "Admin only", Params: `body JSON: {"username", "password", "is_admin"}`, Description: "Create a new user account."},
+		{Method: http.MethodPost, Path: "/api/v1/users", Access: "Admin only", Params: `body JSON: {"username", "password", "is_admin"}`, Description: "Create a new user account (requires write token scope if using Bearer auth)."},
 		{Method: http.MethodDelete, Path: "/api/v1/users/{username}", Access: "Admin only", Params: "path: username", Description: "Delete a user account and revoke all of its sessions and API tokens."},
 		{Method: http.MethodGet, Path: "/api/v1/tokens", Access: "Any user", Params: "—", Description: "List API token metadata (admins see all; members see their own)."},
-		{Method: http.MethodPost, Path: "/api/v1/tokens", Access: "Any user", Params: `body JSON: {"name"}`, Description: "Generate a new frd_... API token (plaintext shown once)."},
-		{Method: http.MethodDelete, Path: "/api/v1/tokens/{id}", Access: "Owner or Admin", Params: "path: id (token ID)", Description: "Revoke an API token immediately."},
+		{Method: http.MethodPost, Path: "/api/v1/tokens", Access: "write / session", Params: `body JSON: {"name", "scope": "read|run|write"}`, Description: "Generate a new frd_... API token with explicit scope (default run; plaintext shown once)."},
+		{Method: http.MethodDelete, Path: "/api/v1/tokens/{id}", Access: "Owner or Admin", Params: "path: id (token ID)", Description: "Revoke an API token immediately (requires write token scope if using Bearer auth)."},
 		{Method: http.MethodGet, Path: "/api/v1/maintenance", Access: "Any user", Params: "—", Description: "Storage footprint metrics (DB rows/size, workspaces disk usage, Docker cache) and active retention policy."},
 		{Method: http.MethodPost, Path: "/api/v1/maintenance/cleanup", Access: "Admin only", Params: "—", Description: "Trigger age-based retention cleanup immediately and return deleted counts."},
 		{Method: http.MethodPost, Path: "/webhooks/sync", Access: "Webhook Secret", Params: "headers: X-Hub-Signature-256 / X-Gitea-Signature / X-Gitlab-Token / Bearer", Description: "Trigger Git sync on push webhooks from GitHub, GitLab, Gitea, etc."},
@@ -156,12 +163,16 @@ func buildAPIEndpointDocs() []apiEndpointDoc {
 
 func buildMCPToolDocs() []apiMCPToolDoc {
 	return []apiMCPToolDoc{
-		{Name: "get_context", Args: "{}", Description: "Inspect .env variable names (no values), counts, Git sync status, and workflow spec URI."},
+		{Name: "get_context", Args: "{}", Description: "Inspect .env variable names (no values), counts, agent_madness write capability, Git sync status, and workflow spec URI."},
 		{Name: "list_flows", Args: "{}", Description: "List discovered YAML workflows with cron schedules and latest run status."},
 		{Name: "get_flow", Args: `{"file": "etl-example.yaml"}`, Description: "Inspect tasks, dependencies, raw YAML, and recent runs (accepts filename or workflow name)."},
 		{Name: "validate_flow", Args: `{"yaml": "name: demo\ntasks:\n  - id: s1\n    runtime: python\n    script: print(1)"}`, Description: "Validate a workflow YAML draft without writing files."},
+		{Name: "save_flow", Args: `{"file": "demo.yaml", "yaml": "..."}`, Description: "Create or update a validated workflow YAML file (requires agent_madness=true, admin + write scope, Git sync off)."},
+		{Name: "delete_flow", Args: `{"file": "demo.yaml"}`, Description: "Delete a workflow YAML file from flows/ (requires agent_madness=true, admin + write scope, Git sync off)."},
 		{Name: "list_includes", Args: "{}", Description: "List shared helper files in includes/."},
 		{Name: "get_include", Args: `{"path": "payload_utils.py"}`, Description: "Read content of a file inside includes/."},
+		{Name: "save_include", Args: `{"path": "payload_utils.py", "content": "..."}`, Description: "Create or update a file inside includes/ up to 512 KiB (requires agent_madness=true, admin + write scope, Git sync off)."},
+		{Name: "delete_include", Args: `{"path": "payload_utils.py"}`, Description: "Delete a file from includes/ (requires agent_madness=true, admin + write scope, Git sync off)."},
 		{Name: "run_flow", Args: `{"file": "...", "wait": false, "timeout_seconds": 60, "tail_lines": 0}`, Description: "Start a workflow; optionally wait up to 300s to return final status and task logs."},
 		{Name: "list_executions", Args: `{"status": "RUNNING|SUCCESS|FAILED|KILLED", "q": "", "limit": 20, "offset": 0}`, Description: "List paginated executions (max 100) and aggregate status counts."},
 		{Name: "get_execution", Args: `{"run_id": "...", "tail_lines": 0}`, Description: "Get run details, triggered_by actor, child subflows, and task logs (optionally tailed)."},

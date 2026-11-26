@@ -103,6 +103,10 @@
         <option value="LOGOUT" {{if eq .ActionFilter "LOGOUT"}}selected{{end}}>LOGOUT</option>
         <option value="FLOW_RUN" {{if eq .ActionFilter "FLOW_RUN"}}selected{{end}}>FLOW_RUN</option>
         <option value="FLOW_KILL" {{if eq .ActionFilter "FLOW_KILL"}}selected{{end}}>FLOW_KILL</option>
+        <option value="FLOW_SAVED" {{if eq .ActionFilter "FLOW_SAVED"}}selected{{end}}>FLOW_SAVED</option>
+        <option value="FLOW_DELETED" {{if eq .ActionFilter "FLOW_DELETED"}}selected{{end}}>FLOW_DELETED</option>
+        <option value="INCLUDE_SAVED" {{if eq .ActionFilter "INCLUDE_SAVED"}}selected{{end}}>INCLUDE_SAVED</option>
+        <option value="INCLUDE_DELETED" {{if eq .ActionFilter "INCLUDE_DELETED"}}selected{{end}}>INCLUDE_DELETED</option>
         <option value="USER_CREATED" {{if eq .ActionFilter "USER_CREATED"}}selected{{end}}>USER_CREATED</option>
         <option value="USER_DELETED" {{if eq .ActionFilter "USER_DELETED"}}selected{{end}}>USER_DELETED</option>
         <option value="PASSWORD_CHANGED" {{if eq .ActionFilter "PASSWORD_CHANGED"}}selected{{end}}>PASSWORD_CHANGED</option>

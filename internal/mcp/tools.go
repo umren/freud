@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"freud/internal/auth"
 	"freud/internal/db"
 	"freud/internal/engine"
 	"freud/internal/service"
@@ -215,13 +216,81 @@ func (s *Server) registerTools() {
 
 	s.registerTool(ToolDefinition{
 		Name:        "get_context",
-		Description: "Return installation context for agents: available .env variable NAMES only (never values), flows/includes counts, Git sync status, and workflow YAML spec resource URI.",
+		Description: "Return installation context for agents: available .env variable NAMES only (never values), flows/includes counts, Git sync status, agent_madness write availability, and workflow YAML spec resource URI.",
 		InputSchema: map[string]any{
 			"type":                 "object",
 			"properties":           map[string]any{},
 			"additionalProperties": false,
 		},
 	}, s.toolGetContext)
+
+	s.registerTool(ToolDefinition{
+		Name:        "save_flow",
+		Description: "Create or update a workflow YAML file under flows/ after validation. Requires agent_madness=true, admin role with write token scope, and Git sync disabled.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"file": map[string]any{
+					"type":        "string",
+					"description": "Flat workflow filename ending in .yaml or .yml (e.g. daily-etl.yaml).",
+				},
+				"yaml": map[string]any{
+					"type":        "string",
+					"description": "Valid workflow YAML content.",
+				},
+			},
+			"required": []string{"file", "yaml"},
+		},
+	}, s.toolSaveFlow)
+
+	s.registerTool(ToolDefinition{
+		Name:        "delete_flow",
+		Description: "Delete a workflow YAML file from flows/. Requires agent_madness=true, admin role with write token scope, and Git sync disabled.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"file": map[string]any{
+					"type":        "string",
+					"description": "Flat workflow filename ending in .yaml or .yml (e.g. daily-etl.yaml).",
+				},
+			},
+			"required": []string{"file"},
+		},
+	}, s.toolDeleteFlow)
+
+	s.registerTool(ToolDefinition{
+		Name:        "save_include",
+		Description: "Create or update a shared helper file inside includes/ (max 512 KiB). Requires agent_madness=true, admin role with write token scope, and Git sync disabled.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Relative path inside includes/ (e.g. payload_utils.py or helpers/common.sh).",
+				},
+				"content": map[string]any{
+					"type":        "string",
+					"description": "File content to write (max 512 KiB).",
+				},
+			},
+			"required": []string{"path", "content"},
+		},
+	}, s.toolSaveInclude)
+
+	s.registerTool(ToolDefinition{
+		Name:        "delete_include",
+		Description: "Delete a shared helper file from includes/. Requires agent_madness=true, admin role with write token scope, and Git sync disabled.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Relative path inside includes/ (e.g. payload_utils.py).",
+				},
+			},
+			"required": []string{"path"},
+		},
+	}, s.toolDeleteInclude)
 }
 
 func decodeArgs(raw json.RawMessage, dst any) error {
@@ -250,6 +319,10 @@ func (s *Server) toolGetFlow(ctx context.Context, raw json.RawMessage) (any, err
 }
 
 func (s *Server) toolRunFlow(ctx context.Context, raw json.RawMessage) (any, error) {
+	actor, err := s.authorizeScope(ctx, auth.TokenScopeRun)
+	if err != nil {
+		return nil, err
+	}
 	if s.cfg.Runner == nil {
 		return nil, fmt.Errorf("execution runner is not configured")
 	}
@@ -267,7 +340,6 @@ func (s *Server) toolRunFlow(ctx context.Context, raw json.RawMessage) (any, err
 		return nil, err
 	}
 
-	actor := actorFromContext(ctx)
 	runCtx := engine.WithTriggeredBy(s.runCtx, actor.Username)
 	runID, doneCh, err := s.cfg.Runner.StartAsync(runCtx, matched.Workflow)
 	if err != nil {
@@ -358,6 +430,10 @@ func (s *Server) toolGetExecution(ctx context.Context, raw json.RawMessage) (any
 }
 
 func (s *Server) toolKillExecution(ctx context.Context, raw json.RawMessage) (any, error) {
+	actor, err := s.authorizeScope(ctx, auth.TokenScopeRun)
+	if err != nil {
+		return nil, err
+	}
 	kr, ok := s.cfg.Runner.(KillableFlowRunner)
 	if !ok {
 		return nil, fmt.Errorf("execution killer is not configured")
@@ -376,11 +452,10 @@ func (s *Server) toolKillExecution(ctx context.Context, raw json.RawMessage) (an
 		return nil, fmt.Errorf("execution %q not found: %w", runID, err)
 	}
 
-	err := kr.Kill(runID)
+	err = kr.Kill(runID)
 	if err != nil && !errors.Is(err, engine.ErrRunNotActive) {
 		return nil, fmt.Errorf("kill run %q: %w", runID, err)
 	}
-	actor := actorFromContext(ctx)
 	if err == nil {
 		_ = s.store.RecordAudit(ctx, actor.Username, "FLOW_KILL", runID, "mcp", actor.Details)
 	}
@@ -409,10 +484,13 @@ func (s *Server) toolListAuditLogs(ctx context.Context, raw json.RawMessage) (an
 }
 
 func (s *Server) toolSyncFlows(ctx context.Context, _ json.RawMessage) (any, error) {
+	actor, err := s.authorizeScope(ctx, auth.TokenScopeRun)
+	if err != nil {
+		return nil, err
+	}
 	if s.cfg.Syncer == nil || !s.cfg.Syncer.Enabled() {
 		return nil, fmt.Errorf("git sync is not enabled")
 	}
-	actor := actorFromContext(ctx)
 	res, err := s.cfg.Syncer.Sync(ctx, syncer.Options{
 		Trigger:     "mcp",
 		Actor:       actor.Username,
@@ -480,6 +558,53 @@ func (s *Server) envKeys() []string {
 	return s.cfg.EnvKeys
 }
 
+func (s *Server) authorizeScope(ctx context.Context, requiredScope string) (Actor, error) {
+	actor := actorFromContext(ctx)
+	if actor.HasToken && !auth.ScopeAllows(actor.Scope, requiredScope) {
+		return Actor{}, fmt.Errorf("token scope %q does not allow %s operations", actor.Scope, requiredScope)
+	}
+	return actor, nil
+}
+
+func (s *Server) writeBlockReason() string {
+	if !s.cfg.AgentMadness {
+		return "agent_madness is disabled in config"
+	}
+	if s.cfg.Syncer != nil && s.cfg.Syncer.Enabled() {
+		return "git sync is enabled; modify flows and includes in the upstream repository"
+	}
+	return ""
+}
+
+func (s *Server) authorizeAgentMadness(ctx context.Context) (Actor, error) {
+	if !s.cfg.AgentMadness {
+		return Actor{}, fmt.Errorf("agent_madness is disabled in config")
+	}
+	if s.cfg.Syncer != nil && s.cfg.Syncer.Enabled() {
+		return Actor{}, fmt.Errorf("flows and includes are managed by Git sync; modify them in the upstream repository")
+	}
+	actor := actorFromContext(ctx)
+	if !actor.IsAdmin {
+		return Actor{}, fmt.Errorf("admin privileges required for agent_madness writes")
+	}
+	if actor.HasToken && !auth.ScopeAllows(actor.Scope, auth.TokenScopeWrite) {
+		return Actor{}, fmt.Errorf("write token scope required (token scope is %q)", actor.Scope)
+	}
+	return actor, nil
+}
+
+func (s *Server) recordAudit(ctx context.Context, actor Actor, action, target, extra string) {
+	details := strings.TrimSpace(extra)
+	if actor.Details != "" {
+		if details != "" {
+			details += ", " + actor.Details
+		} else {
+			details = actor.Details
+		}
+	}
+	_ = s.store.RecordAudit(ctx, actor.Username, action, target, "mcp", details)
+}
+
 func (s *Server) toolGetContext(ctx context.Context, _ json.RawMessage) (any, error) {
 	flows, err := service.ListFlows(ctx, s.store, s.cfg.FlowsDir)
 	if err != nil {
@@ -497,13 +622,121 @@ func (s *Server) toolGetContext(ctx context.Context, _ json.RawMessage) (any, er
 	if envKeys == nil {
 		envKeys = []string{}
 	}
+	blockReason := s.writeBlockReason()
+	writable := blockReason == ""
 	return map[string]any{
 		"env_keys":           envKeys,
 		"flows_count":        len(flows),
 		"includes_count":     len(includes),
 		"sync":               syncStatus,
+		"agent_madness":      s.cfg.AgentMadness,
+		"writable_flows":     writable,
+		"writable_includes":  writable,
+		"write_block_reason": blockReason,
 		"workflow_spec_uri":  workflowSpecURI,
 		"supported_runtimes": []string{workflow.RuntimePython, workflow.RuntimeJS, workflow.RuntimeShell},
+	}, nil
+}
+
+func (s *Server) toolSaveFlow(ctx context.Context, raw json.RawMessage) (any, error) {
+	actor, err := s.authorizeAgentMadness(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var args struct {
+		File string `json:"file"`
+		YAML string `json:"yaml"`
+	}
+	if err := decodeArgs(raw, &args); err != nil {
+		return nil, err
+	}
+	created, cleanName, wf, err := service.SaveFlow(s.cfg.FlowsDir, args.File, args.YAML)
+	if err != nil {
+		return nil, err
+	}
+	verb := "updated"
+	if created {
+		verb = "created"
+	}
+	s.recordAudit(ctx, actor, "FLOW_SAVED", cleanName, fmt.Sprintf("action=%s, workflow=%s", verb, wf.Name))
+	return map[string]any{
+		"file":        cleanName,
+		"name":        wf.Name,
+		"cron":        wf.Cron,
+		"tasks_count": len(wf.Tasks),
+		"created":     created,
+	}, nil
+}
+
+func (s *Server) toolDeleteFlow(ctx context.Context, raw json.RawMessage) (any, error) {
+	actor, err := s.authorizeAgentMadness(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var args struct {
+		File string `json:"file"`
+	}
+	if err := decodeArgs(raw, &args); err != nil {
+		return nil, err
+	}
+	cleanName, err := service.DeleteFlow(s.cfg.FlowsDir, args.File)
+	if err != nil {
+		return nil, err
+	}
+	s.recordAudit(ctx, actor, "FLOW_DELETED", cleanName, "")
+	return map[string]any{
+		"deleted": true,
+		"file":    cleanName,
+	}, nil
+}
+
+func (s *Server) toolSaveInclude(ctx context.Context, raw json.RawMessage) (any, error) {
+	actor, err := s.authorizeAgentMadness(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var args struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := decodeArgs(raw, &args); err != nil {
+		return nil, err
+	}
+	created, cleanPath, size, err := service.SaveInclude(s.cfg.IncludesDir, args.Path, args.Content)
+	if err != nil {
+		return nil, err
+	}
+	verb := "updated"
+	if created {
+		verb = "created"
+	}
+	s.recordAudit(ctx, actor, "INCLUDE_SAVED", cleanPath, fmt.Sprintf("action=%s, bytes=%d", verb, size))
+	return map[string]any{
+		"path":    cleanPath,
+		"size":    size,
+		"created": created,
+	}, nil
+}
+
+func (s *Server) toolDeleteInclude(ctx context.Context, raw json.RawMessage) (any, error) {
+	actor, err := s.authorizeAgentMadness(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := decodeArgs(raw, &args); err != nil {
+		return nil, err
+	}
+	cleanPath, err := service.DeleteInclude(s.cfg.IncludesDir, args.Path)
+	if err != nil {
+		return nil, err
+	}
+	s.recordAudit(ctx, actor, "INCLUDE_DELETED", cleanPath, "")
+	return map[string]any{
+		"deleted": true,
+		"path":    cleanPath,
 	}, nil
 }
 

@@ -118,8 +118,8 @@ Manage cached dependency images:
 Everything works out of the box with zero configuration (`orchestrator.db`, `workspaces/`, `flows/`, `includes/` in the current directory).
 When you want custom locations, Freud loads settings with the following precedence (highest wins):
 
-1. **CLI flags**: `--config`, `--db`, `--flows-dir`, `--includes-dir`, `--workspaces-dir`, `--env-file`, `--no-cache`, `--port`, `--scheduler`, `--no-auth`
-2. **Environment variables**: `FREUD_CONFIG`, `FREUD_DB`, `FREUD_FLOWS_DIR`, `FREUD_INCLUDES_DIR`, `FREUD_WORKSPACES_DIR`, `FREUD_ENV_FILE`, `FREUD_NO_CACHE`, `FREUD_PORT`, `FREUD_SCHEDULER`, `FREUD_NO_AUTH`, `FREUD_ADMIN_PASSWORD`
+1. **CLI flags**: `--config`, `--db`, `--flows-dir`, `--includes-dir`, `--workspaces-dir`, `--env-file`, `--no-cache`, `--agent-madness`, `--port`, `--scheduler`, `--no-auth`
+2. **Environment variables**: `FREUD_CONFIG`, `FREUD_DB`, `FREUD_FLOWS_DIR`, `FREUD_INCLUDES_DIR`, `FREUD_WORKSPACES_DIR`, `FREUD_ENV_FILE`, `FREUD_NO_CACHE`, `FREUD_AGENT_MADNESS`, `FREUD_PORT`, `FREUD_SCHEDULER`, `FREUD_NO_AUTH`, `FREUD_ADMIN_PASSWORD`
 3. **Optional `freud.toml`** in the current directory (or via `--config <path>`):
 
 ```toml
@@ -129,6 +129,7 @@ flows_dir = "./pipelines"
 includes_dir = "./shared_libs"
 env_file = ".env.prod"
 no_cache = false
+agent_madness = false               # opt-in: allow admin + write tokens to edit/delete flows & includes via API/MCP when [sync].enabled = false
 
 [dream]
 port = 4321
@@ -270,7 +271,10 @@ tasks:
 
 ### Authentication & API Tokens
 
-* Generate a personal Bearer token (`frd_...`) in the Web UI under **API (`/api`) → API Tokens** or via `POST /api/v1/tokens` (signed in with a browser session cookie or existing token).
+* Generate a personal Bearer token (`frd_...`) with a scope (`read`, `run`, or `write`; defaults to `run`) in the Web UI under **API (`/api`) → API Tokens** or via `POST /api/v1/tokens` (signed in with a browser session cookie or existing `write`-scoped token).
+  * `read`: read-only endpoints/tools (`flows`, `includes`, `executions`, `audit`, `context`, `spec`, `maintenance` metrics).
+  * `run`: includes `read`, plus executing/killing flows and triggering Git sync.
+  * `write`: includes `run`, plus `agent_madness` flow/include writes & deletes (requires an `admin` user and `sync.enabled = false`) and user/token/maintenance admin mutations.
 * Pass the token in the `Authorization` header:
 
 ```bash
@@ -278,11 +282,11 @@ export FREUD_TOKEN="frd_your_token_here"
 curl -s -H "Authorization: Bearer $FREUD_TOKEN" http://localhost:4321/api/v1/flows | jq
 ```
 
-* Every API action (`FLOW_RUN`, `FLOW_KILL`, `USER_CREATED`, `USER_DELETED`, `TOKEN_CREATED`, `TOKEN_REVOKED`) is recorded in `audit_logs` with `source: "api"` and the token name in `details`.
+* Every API action (`FLOW_RUN`, `FLOW_KILL`, `FLOW_SAVED`, `FLOW_DELETED`, `INCLUDE_SAVED`, `INCLUDE_DELETED`, `USER_CREATED`, `USER_DELETED`, `TOKEN_CREATED`, `TOKEN_REVOKED`) is recorded in `audit_logs` with `source: "api"` and the token name in `details`.
 * Error responses use JSON (`{"error": "..."}`) with standard status codes:
   * `401 Unauthorized` — missing, invalid, or revoked Bearer token / session cookie
-  * `403 Forbidden` — admin privileges required (`POST/DELETE /api/v1/users`, or revoking another user's token as non-admin)
-  * `409 Conflict` — Dream UI authentication is enabled, and initial admin `/setup` has not been completed yet (except `GET /api/v1/health`)
+  * `403 Forbidden` — admin privileges required, token scope insufficient, or `agent_madness` disabled
+  * `409 Conflict` — Dream UI initial admin `/setup` pending, or write blocked because `[sync].enabled = true`
 * When `./freud dream --no-auth` is active, API endpoints work without a token (except `/api/v1/tokens`, which requires authentication to be enabled).
 
 ### Endpoints
@@ -291,26 +295,30 @@ curl -s -H "Authorization: Bearer $FREUD_TOKEN" http://localhost:4321/api/v1/flo
 | --- | --- | --- | --- |
 | `GET` | `/api/v1/health` | Public | Server health (`status`, `auth_enabled`, `setup_required`, `scheduler_on`) |
 | `GET` | `/api/v1/me` | Any user | Current authenticated user (`username`, `is_admin`, `created_at`) |
-| `GET` | `/api/v1/context` | Any user | Agent installation context: `.env` variable **names** only (never values), counts, sync status |
-| `GET` | `/api/v1/spec` | Any user | Canonical workflow YAML specification (`?format=raw` for Markdown) |
-| `GET` | `/api/v1/flows` | Any user | List discovered workflows in `flows/` with cron schedule and latest run |
-| `POST` | `/api/v1/flows/validate` | Any user | Validate a workflow YAML draft (`{"yaml"}`) without saving to disk |
-| `GET` | `/api/v1/flows/{file}` | Any user | Flow details, parsed task list, raw YAML, and recent runs |
-| `POST` | `/api/v1/flows/{file}/run` | Any user | Start workflow execution asynchronously (`202 Accepted` with `run_id`) |
-| `GET` | `/api/v1/includes` | Any user | List shared files under `includes/` |
-| `GET` | `/api/v1/includes/{path}` | Any user | Read a shared file under `includes/` safely |
-| `GET` | `/api/v1/executions` | Any user | Run stats + paginated runs (`?status=RUNNING\|SUCCESS\|FAILED\|KILLED&q=&limit=50&offset=0`) |
-| `GET` | `/api/v1/executions/{id}` | Any user | Execution metadata, child subflow runs, and task runs (`?tail_lines=100` optional) |
-| `POST` | `/api/v1/executions/{id}/kill` | Any user | Terminate an active run and record `KILLED` status |
-| `GET` | `/api/v1/audit` | Any user | Paginated activity audit log (`?action=FLOW_RUN&q=&limit=100&offset=0`) |
-| `GET` | `/api/v1/users` | Any user | List registered accounts (without password hashes) |
-| `POST` | `/api/v1/users` | **Admin only** | Create user (`{"username","password","is_admin"}`) |
-| `DELETE` | `/api/v1/users/{username}` | **Admin only** | Delete user account (revokes sessions & API tokens) |
-| `GET` | `/api/v1/tokens` | Any user | List API tokens (admins see all tokens; members see their own) |
-| `POST` | `/api/v1/tokens` | Any user | Issue a new API token (`{"name":"github-ci"}`) — raw token returned once |
-| `DELETE` | `/api/v1/tokens/{id}` | Owner or Admin | Revoke an API token by ID |
-| `GET` | `/api/v1/maintenance` | Any user | Storage footprint (`runs`, `task_runs`, `workspaces`, Docker cache) and active retention policy |
-| `POST` | `/api/v1/maintenance/cleanup` | **Admin only** | Run age-based cleanup now and return reclaimed counts |
+| `GET` | `/api/v1/context` | `read` | Agent installation context: `.env` variable **names** only, counts, `agent_madness` / write status, sync status |
+| `GET` | `/api/v1/spec` | `read` | Canonical workflow YAML specification (`?format=raw` for Markdown) |
+| `GET` | `/api/v1/flows` | `read` | List discovered workflows in `flows/` with cron schedule and latest run |
+| `POST` | `/api/v1/flows/validate` | `read` | Validate a workflow YAML draft (`{"yaml"}`) without saving to disk |
+| `GET` | `/api/v1/flows/{file}` | `read` | Flow details, parsed task list, raw YAML, and recent runs |
+| `PUT` | `/api/v1/flows/{file}` | **Admin + `write`** | Create/update workflow YAML (validated; requires `agent_madness = true` & Git sync disabled) |
+| `DELETE` | `/api/v1/flows/{file}` | **Admin + `write`** | Delete workflow YAML file (requires `agent_madness = true` & Git sync disabled) |
+| `POST` | `/api/v1/flows/{file}/run` | `run` | Start workflow execution asynchronously (`202 Accepted` with `run_id`) |
+| `GET` | `/api/v1/includes` | `read` | List shared files under `includes/` |
+| `GET` | `/api/v1/includes/{path}` | `read` | Read a shared file under `includes/` safely |
+| `PUT` | `/api/v1/includes/{path}` | **Admin + `write`** | Create/update shared file in `includes/` (max 512 KiB; requires `agent_madness = true` & Git sync disabled) |
+| `DELETE` | `/api/v1/includes/{path}` | **Admin + `write`** | Delete shared file from `includes/` (requires `agent_madness = true` & Git sync disabled) |
+| `GET` | `/api/v1/executions` | `read` | Run stats + paginated runs (`?status=RUNNING\|SUCCESS\|FAILED\|KILLED&q=&limit=50&offset=0`) |
+| `GET` | `/api/v1/executions/{id}` | `read` | Execution metadata, child subflow runs, and task runs (`?tail_lines=100` optional) |
+| `POST` | `/api/v1/executions/{id}/kill` | `run` | Terminate an active run and record `KILLED` status |
+| `GET` | `/api/v1/audit` | `read` | Paginated activity audit log (`?action=FLOW_RUN&q=&limit=100&offset=0`) |
+| `GET` | `/api/v1/users` | `read` | List registered accounts (without password hashes) |
+| `POST` | `/api/v1/users` | **Admin + `write`** | Create user (`{"username","password","is_admin"}`) |
+| `DELETE` | `/api/v1/users/{username}` | **Admin + `write`** | Delete user account (revokes sessions & API tokens) |
+| `GET` | `/api/v1/tokens` | `read` | List API tokens (admins see all tokens; members see their own) |
+| `POST` | `/api/v1/tokens` | `write` / session | Issue a new API token (`{"name":"github-ci","scope":"read\|run\|write"}`) — raw token returned once |
+| `DELETE` | `/api/v1/tokens/{id}` | Owner/Admin + `write` | Revoke an API token by ID |
+| `GET` | `/api/v1/maintenance` | `read` | Storage footprint (`runs`, `task_runs`, `workspaces`, Docker cache) and active retention policy |
+| `POST` | `/api/v1/maintenance/cleanup` | **Admin + `write`** | Run age-based cleanup now and return reclaimed counts |
 
 ### Quick Examples
 
@@ -351,17 +359,19 @@ Freud embeds a zero-dependency **MCP JSON-RPC 2.0 server** inside the same binar
 ### Exposed Tools & Resources
 
 - **Tools**:
-  - `get_context` — inspect available `.env` variable **names** (never values), counts, Git sync status, and spec URI
+  - `get_context` — inspect available `.env` variable **names** (never values), counts, `agent_madness` / write status, Git sync status, and spec URI
   - `list_flows` — list discovered YAML flows, cron schedules, and latest run status
   - `get_flow` (`{file}`) — inspect workflow tasks, dependencies, raw YAML, and recent runs
   - `validate_flow` (`{yaml}`) — validate a draft YAML workflow without writing files
+  - `save_flow` (`{file, yaml}`) / `delete_flow` (`{file}`) — create/update (validated) or delete workflow files (`agent_madness = true`, admin + `write` scope, Git sync disabled)
   - `list_includes` / `get_include` (`{path}`) — inspect shared scripts in `includes/`
-  - `run_flow` (`{file, wait?, timeout_seconds?, tail_lines?}`) — trigger a workflow asynchronously or wait (up to 300s) for completion & task logs
+  - `save_include` (`{path, content}`) / `delete_include` (`{path}`) — create/update or delete shared files in `includes/` (`agent_madness = true`, admin + `write` scope, Git sync disabled)
+  - `run_flow` (`{file, wait?, timeout_seconds?, tail_lines?}`) — trigger a workflow asynchronously or wait (up to 300s) for completion & task logs (`run` scope)
   - `list_executions` (`{status?, q?, limit?, offset?}`) — query paginated execution history and status stats
   - `get_execution` (`{run_id, tail_lines?}`) — inspect execution status, `triggered_by`, child subflows, and task logs
-  - `kill_execution` (`{run_id}`) — terminate an active `RUNNING` execution
+  - `kill_execution` (`{run_id}`) — terminate an active `RUNNING` execution (`run` scope)
   - `list_audit_logs` (`{action?, q?, limit?, offset?}`) — query paginated activity audit trail
-  - `sync_flows` — trigger Git repository sync now and return commit/diff summary & `run_id`
+  - `sync_flows` — trigger Git repository sync now and return commit/diff summary & `run_id` (`run` scope)
 - **Resources**:
   - `freud://docs/workflow-spec` (`text/markdown`) — canonical workflow YAML specification
   - `freud://flows/{file}` (`text/yaml`) — workflow YAML definitions

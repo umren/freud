@@ -107,7 +107,10 @@ func ReadInclude(includesDir, rel string) (*IncludeContent, error) {
 		if relErr != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("%w: file path %q escapes includes directory", ErrInvalidInclude, rel)
 		}
-		st, statErr := os.Stat(target)
+		if err := ensureNoSymlinksUnderRoot(absRoot, filepath.ToSlash(relCheck), ErrInvalidInclude); err != nil {
+			return nil, err
+		}
+		st, statErr := os.Lstat(target)
 		if statErr == nil {
 			absTarget = target
 			checkRel = relCheck

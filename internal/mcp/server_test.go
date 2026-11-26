@@ -11,8 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"freud/internal/auth"
+	"freud/internal/config"
 	"freud/internal/db"
 	"freud/internal/engine"
+	"freud/internal/syncer"
 	"freud/internal/workflow"
 )
 
@@ -304,5 +307,186 @@ func TestMCPIncludesSpecEnvContextAndTail(t *testing.T) {
 	}
 	if !strings.Contains(lines[8], "earlier lines omitted") || !strings.Contains(lines[8], "line5") || strings.Contains(lines[8], "line1") {
 		t.Fatalf("get_execution tail_lines=2 failed: %s", lines[8])
+	}
+}
+
+func callMCPTool(t *testing.T, srv *Server, ctx context.Context, name string, args any) (string, bool) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      name,
+			"arguments": args,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := srv.ServeStdio(ctx, bytes.NewReader(append(payload, '\n')), &out); err != nil {
+		t.Fatalf("ServeStdio(%s) failed: %v", name, err)
+	}
+	var resp struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("invalid JSON response for %s: %v\nraw: %s", name, err, out.String())
+	}
+	if resp.Error != nil {
+		return resp.Error.Message, true
+	}
+	var txt string
+	if len(resp.Result.Content) > 0 {
+		txt = resp.Result.Content[0].Text
+	}
+	return txt, resp.Result.IsError
+}
+
+func TestMCPAgentMadnessAndTokenScopes(t *testing.T) {
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	includesDir := filepath.Join(tmp, "includes")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(includesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	baseYAML := "name: mcp-base\ntasks:\n  - id: s1\n    runtime: python\n    script: print(1)\n"
+	if err := os.WriteFile(filepath.Join(flowsDir, "mcp.yaml"), []byte(baseYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := db.Open(filepath.Join(tmp, "madness.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	runner := &mockMCPRunner{store: store}
+	adminWriteCtx := WithAuth(context.Background(), "alice", "token=ci-write", true, auth.TokenScopeWrite, true)
+
+	// 1. Disabled by default: context reports writable=false and all writes fail.
+	srvOff := NewServer(store, Config{
+		FlowsDir:    flowsDir,
+		IncludesDir: includesDir,
+		Runner:      runner,
+	})
+	txt, isErr := callMCPTool(t, srvOff, adminWriteCtx, "get_context", map[string]any{})
+	if isErr || !strings.Contains(txt, `"agent_madness": false`) || !strings.Contains(txt, `"writable_flows": false`) {
+		t.Fatalf("expected agent_madness=false in context, got err=%v text=%s", isErr, txt)
+	}
+	for _, tool := range []string{"save_flow", "delete_flow", "save_include", "delete_include"} {
+		msg, failed := callMCPTool(t, srvOff, adminWriteCtx, tool, map[string]any{"file": "mcp.yaml", "yaml": baseYAML, "path": "a.py", "content": "x"})
+		if !failed || !strings.Contains(msg, "agent_madness is disabled") {
+			t.Fatalf("expected agent_madness disabled error for %s, got failed=%v msg=%s", tool, failed, msg)
+		}
+	}
+
+	// 2. Git sync enabled: writes blocked even when agent_madness=true.
+	syncCfg := config.Default()
+	syncCfg.FlowsDir = flowsDir
+	syncCfg.IncludesDir = includesDir
+	syncCfg.Sync = config.SyncConfig{
+		Enabled: true,
+		Repo:    filepath.Join(tmp, "upstream.git"),
+		Branch:  "main",
+	}
+	gitSyncer, err := syncer.New(store, syncCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvSync := NewServer(store, Config{
+		FlowsDir:     flowsDir,
+		IncludesDir:  includesDir,
+		Runner:       runner,
+		Syncer:       gitSyncer,
+		AgentMadness: true,
+	})
+	txt, isErr = callMCPTool(t, srvSync, adminWriteCtx, "get_context", map[string]any{})
+	if isErr || !strings.Contains(txt, `"agent_madness": true`) || !strings.Contains(txt, `"writable_flows": false`) || !strings.Contains(txt, "git sync") {
+		t.Fatalf("expected sync write block in context, got err=%v text=%s", isErr, txt)
+	}
+	msg, failed := callMCPTool(t, srvSync, adminWriteCtx, "save_flow", map[string]any{"file": "new.yaml", "yaml": baseYAML})
+	if !failed || !strings.Contains(msg, "Git sync") {
+		t.Fatalf("expected Git sync block on save_flow, got failed=%v msg=%s", failed, msg)
+	}
+
+	// 3. Enabled without Git sync: enforce token scopes + admin role + full CRUD/audit.
+	srvOn := NewServer(store, Config{
+		FlowsDir:     flowsDir,
+		IncludesDir:  includesDir,
+		Runner:       runner,
+		AgentMadness: true,
+	})
+
+	readCtx := WithAuth(context.Background(), "alice", "token=ro", true, auth.TokenScopeRead, true)
+	if _, failed := callMCPTool(t, srvOn, readCtx, "list_flows", map[string]any{}); failed {
+		t.Fatalf("expected read token to list_flows")
+	}
+	if msg, failed := callMCPTool(t, srvOn, readCtx, "run_flow", map[string]any{"file": "mcp.yaml"}); !failed || !strings.Contains(msg, "scope") {
+		t.Fatalf("expected read token to be blocked from run_flow, got failed=%v msg=%s", failed, msg)
+	}
+	if msg, failed := callMCPTool(t, srvOn, readCtx, "save_flow", map[string]any{"file": "a.yaml", "yaml": baseYAML}); !failed || !strings.Contains(msg, "write token scope") {
+		t.Fatalf("expected read token blocked from save_flow, got failed=%v msg=%s", failed, msg)
+	}
+
+	runCtx := WithAuth(context.Background(), "alice", "token=ci-run", true, auth.TokenScopeRun, true)
+	if txt, failed := callMCPTool(t, srvOn, runCtx, "run_flow", map[string]any{"file": "mcp.yaml", "wait": true}); failed || !strings.Contains(txt, "SUCCESS") {
+		t.Fatalf("expected run token to run_flow, got failed=%v txt=%s", failed, txt)
+	}
+	srvOn.Wait()
+	if msg, failed := callMCPTool(t, srvOn, runCtx, "save_flow", map[string]any{"file": "a.yaml", "yaml": baseYAML}); !failed || !strings.Contains(msg, "write token scope") {
+		t.Fatalf("expected run token blocked from save_flow, got failed=%v msg=%s", failed, msg)
+	}
+
+	memberWriteCtx := WithAuth(context.Background(), "bob", "token=bob-write", false, auth.TokenScopeWrite, true)
+	if msg, failed := callMCPTool(t, srvOn, memberWriteCtx, "save_flow", map[string]any{"file": "a.yaml", "yaml": baseYAML}); !failed || !strings.Contains(msg, "admin privileges required") {
+		t.Fatalf("expected non-admin write token blocked, got failed=%v msg=%s", failed, msg)
+	}
+
+	// Admin + write token saves invalid YAML -> rejected without writing file.
+	if _, failed := callMCPTool(t, srvOn, adminWriteCtx, "save_flow", map[string]any{"file": "bad.yaml", "yaml": "name: bad\ntasks: []"}); !failed {
+		t.Fatalf("expected invalid YAML save_flow to fail")
+	}
+	if _, err := os.Stat(filepath.Join(flowsDir, "bad.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("bad.yaml should not exist on disk")
+	}
+
+	// Admin + write token full lifecycle: save/update/delete flow & include.
+	if txt, failed := callMCPTool(t, srvOn, adminWriteCtx, "save_flow", map[string]any{"file": "agent.yaml", "yaml": baseYAML}); failed || !strings.Contains(txt, `"created": true`) {
+		t.Fatalf("expected save_flow create, got failed=%v txt=%s", failed, txt)
+	}
+	updatedYAML := "name: mcp-updated\ntasks:\n  - id: s1\n    runtime: python\n    script: print(2)\n"
+	if txt, failed := callMCPTool(t, srvOn, adminWriteCtx, "save_flow", map[string]any{"file": "agent.yaml", "yaml": updatedYAML}); failed || !strings.Contains(txt, `"created": false`) {
+		t.Fatalf("expected save_flow update, got failed=%v txt=%s", failed, txt)
+	}
+	if txt, failed := callMCPTool(t, srvOn, adminWriteCtx, "save_include", map[string]any{"path": "sub/util.py", "content": "def f(): return 1\n"}); failed || !strings.Contains(txt, `"created": true`) {
+		t.Fatalf("expected save_include create, got failed=%v txt=%s", failed, txt)
+	}
+	if txt, failed := callMCPTool(t, srvOn, adminWriteCtx, "delete_include", map[string]any{"path": "sub/util.py"}); failed || !strings.Contains(txt, `"deleted": true`) {
+		t.Fatalf("expected delete_include, got failed=%v txt=%s", failed, txt)
+	}
+	if txt, failed := callMCPTool(t, srvOn, adminWriteCtx, "delete_flow", map[string]any{"file": "agent.yaml"}); failed || !strings.Contains(txt, `"deleted": true`) {
+		t.Fatalf("expected delete_flow, got failed=%v txt=%s", failed, txt)
+	}
+
+	for _, action := range []string{"FLOW_SAVED", "INCLUDE_SAVED", "INCLUDE_DELETED", "FLOW_DELETED"} {
+		logs, _, err := store.ListAuditLogsPage(context.Background(), db.AuditQuery{Action: action, Limit: 10})
+		if err != nil || len(logs) == 0 {
+			t.Fatalf("expected audit log %s, err=%v count=%d", action, err, len(logs))
+		}
+		if logs[0].Username != "alice" || logs[0].Source != "mcp" {
+			t.Fatalf("unexpected audit actor/source for %s: %+v", action, logs[0])
+		}
 	}
 }

@@ -48,6 +48,16 @@ func TestPasswordAndValidation(t *testing.T) {
 	if err != nil || len(raw) != 68 || prefix != raw[:12] || tokenHash != HashAPIToken(raw) {
 		t.Fatalf("unexpected api token: raw=%q prefix=%q hash=%q err=%v", raw, prefix, tokenHash, err)
 	}
+
+	if s, err := ValidateTokenScope(""); err != nil || s != TokenScopeRun {
+		t.Fatalf("expected empty scope default 'run', got %q err=%v", s, err)
+	}
+	if _, err := ValidateTokenScope("superadmin"); err == nil {
+		t.Fatal("expected invalid token scope error")
+	}
+	if !ScopeAllows(TokenScopeWrite, TokenScopeRead) || !ScopeAllows(TokenScopeRun, TokenScopeRead) || ScopeAllows(TokenScopeRead, TokenScopeRun) || ScopeAllows(TokenScopeRun, TokenScopeWrite) {
+		t.Fatal("ScopeAllows hierarchy check failed")
+	}
 }
 
 func TestLoginLimiterAndEnsureAdminFromEnv(t *testing.T) {

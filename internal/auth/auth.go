@@ -21,7 +21,44 @@ const (
 	minPasswordLen = 6
 	maxPasswordLen = 128
 	sessionTTL     = 7 * 24 * time.Hour
+
+	TokenScopeRead  = "read"
+	TokenScopeRun   = "run"
+	TokenScopeWrite = "write"
 )
+
+// ValidateTokenScope normalizes and validates an API token permission scope ("read", "run", or "write").
+// Empty defaults to "run".
+func ValidateTokenScope(scope string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(scope))
+	if s == "" {
+		return TokenScopeRun, nil
+	}
+	switch s {
+	case TokenScopeRead, TokenScopeRun, TokenScopeWrite:
+		return s, nil
+	default:
+		return "", fmt.Errorf("invalid token scope %q (must be read, run, or write)", scope)
+	}
+}
+
+func scopeRank(scope string) int {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case TokenScopeWrite:
+		return 3
+	case TokenScopeRun:
+		return 2
+	case TokenScopeRead:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// ScopeAllows reports whether a token's assigned scope satisfies the required scope.
+func ScopeAllows(have, required string) bool {
+	return scopeRank(have) >= scopeRank(required) && scopeRank(required) > 0
+}
 
 var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{1,31}$`)
 

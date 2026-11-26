@@ -106,6 +106,7 @@ type Config struct {
 	IncludesDir      string          `toml:"includes_dir"`
 	EnvFile          string          `toml:"env_file"`
 	NoCache          bool            `toml:"no_cache"`
+	AgentMadness     bool            `toml:"agent_madness"`
 	Dream            DreamConfig     `toml:"dream"`
 	TUI              TUIConfig       `toml:"tui"`
 	Sync             SyncConfig      `toml:"sync"`
@@ -121,6 +122,7 @@ type Overrides struct {
 	IncludesDir   *string
 	EnvFile       *string
 	NoCache       *bool
+	AgentMadness  *bool
 	DreamPort     *int
 	Scheduler     *bool
 	NoAuth        *bool
@@ -359,6 +361,13 @@ func applyEnvVars(cfg *Config) error {
 		}
 		cfg.NoCache = b
 	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_AGENT_MADNESS")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid FREUD_AGENT_MADNESS %q: %w", v, err)
+		}
+		cfg.AgentMadness = b
+	}
 	if v := strings.TrimSpace(os.Getenv("FREUD_PORT")); v != "" {
 		p, err := strconv.Atoi(v)
 		if err != nil {
@@ -482,6 +491,9 @@ func applyOverrides(cfg *Config, ov Overrides) {
 	}
 	if ov.NoCache != nil {
 		cfg.NoCache = *ov.NoCache
+	}
+	if ov.AgentMadness != nil {
+		cfg.AgentMadness = *ov.AgentMadness
 	}
 	if ov.DreamPort != nil {
 		cfg.Dream.Port = *ov.DreamPort

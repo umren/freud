@@ -30,6 +30,11 @@
     {{if and .AuthEnabled .CurrentUser}}
     <form method="post" action="/tokens" class="toolbar">
       <input class="input" type="text" name="name" placeholder="Token label (e.g. github-ci)" required>
+      <select class="select" name="scope" title="Token scope">
+        <option value="run" selected>run (trigger/kill/sync)</option>
+        <option value="read">read (read-only)</option>
+        <option value="write">write (admin + agent_madness)</option>
+      </select>
       <button type="submit" class="btn btn-primary">Generate Token</button>
     </form>
     {{end}}
@@ -40,6 +45,7 @@
       <tr>
         <th>Name</th>
         <th>Owner</th>
+        <th>Scope</th>
         <th>Prefix</th>
         <th>Last Used</th>
         <th>Created</th>
@@ -51,6 +57,7 @@
       <tr>
         <td class="mono"><strong>{{.Name}}</strong></td>
         <td class="mono">{{.Username}}</td>
+        <td><span class="badge badge-neutral mono">{{.Scope}}</span></td>
         <td class="mono muted">{{.Prefix}}...</td>
         <td class="mono muted">{{.LastUsedAt}}</td>
         <td class="mono muted">{{.CreatedAt}}</td>
@@ -61,7 +68,7 @@
         </td>
       </tr>
       {{else}}
-      <tr><td colspan="6" class="muted">No API tokens created yet. Generate one above to call <span class="mono">/api/v1/*</span> or <span class="mono">/mcp</span>.</td></tr>
+      <tr><td colspan="7" class="muted">No API tokens created yet. Generate one above to call <span class="mono">/api/v1/*</span> or <span class="mono">/mcp</span>.</td></tr>
       {{end}}
     </tbody>
   </table>
@@ -111,8 +118,8 @@
       <ul style="margin:0;padding-left:18px">
         <li><span class="mono">Authorization: Bearer frd_&lt;token&gt;</span> — recommended for CI/CD, scripts, and MCP clients</li>
         <li><span class="mono">401 Unauthorized</span> — missing, invalid, or revoked token/session (<span class="mono">{"error": "..."}</span>)</li>
-        <li><span class="mono">403 Forbidden</span> — admin privileges or token ownership required</li>
-        <li><span class="mono">409 Conflict</span> — initial admin <span class="mono">/setup</span> has not been completed yet</li>
+        <li><span class="mono">403 Forbidden</span> — admin privileges, insufficient token scope, or disabled <span class="mono">agent_madness</span></li>
+        <li><span class="mono">409 Conflict</span> — initial admin <span class="mono">/setup</span> pending or write blocked by active Git sync</li>
       </ul>
     </div>
   </section>

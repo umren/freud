@@ -70,6 +70,7 @@ type cliFlagBindings struct {
 	includesDir   string
 	envFile       string
 	noCache       bool
+	agentMadness  bool
 	port          int
 	scheduler     bool
 	noAuth        bool
@@ -83,6 +84,7 @@ func registerCommonFlags(fs *flag.FlagSet, b *cliFlagBindings) {
 	fs.StringVar(&b.includesDir, "includes-dir", config.DefaultIncludesDir, "Directory containing shared include files")
 	fs.StringVar(&b.envFile, "env-file", "", "Optional path to a .env file")
 	fs.BoolVar(&b.noCache, "no-cache", false, "Bypass and rebuild cached dependency images")
+	fs.BoolVar(&b.agentMadness, "agent-madness", false, "Allow admin write-scoped API/MCP callers to edit or delete flows and includes when Git sync is disabled")
 }
 
 func registerDreamFlags(fs *flag.FlagSet, b *cliFlagBindings) {
@@ -115,6 +117,8 @@ func (b *cliFlagBindings) toOverrides(fs *flag.FlagSet) config.Overrides {
 			ov.EnvFile = &b.envFile
 		case "no-cache":
 			ov.NoCache = &b.noCache
+		case "agent-madness":
+			ov.AgentMadness = &b.agentMadness
 		case "port":
 			ov.DreamPort = &b.port
 		case "scheduler":
@@ -340,15 +344,16 @@ func runDreamCmd(args []string) error {
 
 	addr := fmt.Sprintf(":%d", cfg.Dream.Port)
 	uiServer, err := ui.NewServer(rt.store, ui.Config{
-		Addr:        addr,
-		FlowsDir:    cfg.FlowsDir,
-		IncludesDir: cfg.IncludesDir,
-		SchedulerOn: cfg.Dream.Scheduler,
-		EnableAuth:  enableAuth,
-		Runner:      rt.eng,
-		Syncer:      gitSyncer,
-		Maintenance: maintSvc,
-		RunCtx:      ctx,
+		Addr:         addr,
+		FlowsDir:     cfg.FlowsDir,
+		IncludesDir:  cfg.IncludesDir,
+		SchedulerOn:  cfg.Dream.Scheduler,
+		EnableAuth:   enableAuth,
+		AgentMadness: cfg.AgentMadness,
+		Runner:       rt.eng,
+		Syncer:       gitSyncer,
+		Maintenance:  maintSvc,
+		RunCtx:       ctx,
 	})
 	if err != nil {
 		return err
@@ -462,6 +467,9 @@ func runMCPWithIO(args []string, in io.Reader, out io.Writer) error {
 
 	actorName := auth.LocalActor()
 	actorDetails := "stdio"
+	actorIsAdmin := true
+	actorScope := auth.TokenScopeWrite
+	actorHasToken := false
 	token = strings.TrimSpace(token)
 	if token == "" {
 		token = strings.TrimSpace(os.Getenv("FREUD_MCP_TOKEN"))
@@ -473,6 +481,9 @@ func runMCPWithIO(args []string, in io.Reader, out io.Writer) error {
 		}
 		actorName = u.Username
 		actorDetails = "token=" + tokRec.Name
+		actorIsAdmin = u.IsAdmin
+		actorScope = tokRec.Scope
+		actorHasToken = true
 	}
 
 	var gitSyncer *syncer.Syncer
@@ -484,17 +495,18 @@ func runMCPWithIO(args []string, in io.Reader, out io.Writer) error {
 	}
 
 	mcpSrv := mcp.NewServer(rt.store, mcp.Config{
-		FlowsDir:    cfg.FlowsDir,
-		IncludesDir: cfg.IncludesDir,
-		Runner:      rt.eng,
-		Syncer:      gitSyncer,
-		RunCtx:      ctx,
+		FlowsDir:     cfg.FlowsDir,
+		IncludesDir:  cfg.IncludesDir,
+		Runner:       rt.eng,
+		Syncer:       gitSyncer,
+		AgentMadness: cfg.AgentMadness,
+		RunCtx:       ctx,
 		OnLog: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "[mcp] "+format+"\n", args...)
 		},
 	})
 
-	serveCtx := mcp.WithActor(ctx, actorName, actorDetails)
+	serveCtx := mcp.WithAuth(ctx, actorName, actorDetails, actorIsAdmin, actorScope, actorHasToken)
 	err = mcpSrv.ServeStdio(serveCtx, in, out)
 	stop()
 	mcpSrv.Wait()
