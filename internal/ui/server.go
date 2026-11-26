@@ -141,10 +141,11 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 		limiter: auth.NewLoginLimiter(10, 5*time.Minute),
 		maint:   maintSvc,
 		mcpSrv: mcp.NewServer(store, mcp.Config{
-			FlowsDir: cfg.FlowsDir,
-			Runner:   cfg.Runner,
-			Syncer:   cfg.Syncer,
-			RunCtx:   runCtx,
+			FlowsDir:    cfg.FlowsDir,
+			IncludesDir: cfg.IncludesDir,
+			Runner:      cfg.Runner,
+			Syncer:      cfg.Syncer,
+			RunCtx:      runCtx,
 		}),
 		pages:     pages,
 		partials:  partials,
@@ -189,11 +190,16 @@ func (s *Server) Handler() http.Handler {
 	// REST API v1 (JSON, Bearer token or session cookie auth)
 	mux.HandleFunc("GET /api/v1/health", s.handleAPIHealth)
 	mux.HandleFunc("GET /api/v1/me", s.handleAPIMe)
+	mux.HandleFunc("GET /api/v1/context", s.handleAPIContext)
+	mux.HandleFunc("GET /api/v1/spec", s.handleAPISpec)
 	mux.HandleFunc("GET /api/v1/flows", s.handleAPIFlows)
+	mux.HandleFunc("POST /api/v1/flows/validate", s.handleAPIValidateFlow)
 	mux.HandleFunc("GET /api/v1/flows/sync", s.handleAPISyncStatus)
 	mux.HandleFunc("POST /api/v1/flows/sync", s.handleAPISyncFlows)
 	mux.HandleFunc("GET /api/v1/flows/{file}", s.handleAPIFlowDetail)
 	mux.HandleFunc("POST /api/v1/flows/{file}/run", s.handleAPIRunFlow)
+	mux.HandleFunc("GET /api/v1/includes", s.handleAPIIncludesList)
+	mux.HandleFunc("GET /api/v1/includes/{path...}", s.handleAPIIncludeDetail)
 	mux.HandleFunc("GET /api/v1/executions", s.handleAPIExecutions)
 	mux.HandleFunc("GET /api/v1/executions/{id}", s.handleAPIExecutionDetail)
 	mux.HandleFunc("POST /api/v1/executions/{id}/kill", s.handleAPIKillExecution)

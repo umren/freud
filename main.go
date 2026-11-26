@@ -484,10 +484,11 @@ func runMCPWithIO(args []string, in io.Reader, out io.Writer) error {
 	}
 
 	mcpSrv := mcp.NewServer(rt.store, mcp.Config{
-		FlowsDir: cfg.FlowsDir,
-		Runner:   rt.eng,
-		Syncer:   gitSyncer,
-		RunCtx:   ctx,
+		FlowsDir:    cfg.FlowsDir,
+		IncludesDir: cfg.IncludesDir,
+		Runner:      rt.eng,
+		Syncer:      gitSyncer,
+		RunCtx:      ctx,
 		OnLog: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "[mcp] "+format+"\n", args...)
 		},

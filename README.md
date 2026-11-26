@@ -1,6 +1,6 @@
 # Freud (v0.1)
 
-A pure-Go task orchestrator that parses YAML workflow definitions, resolves task dependencies as a DAG, executes tasks in ephemeral Docker containers, shares data across steps via a per-run workspace directory, and persists execution state and logs in SQLite, PostgreSQL, MySQL, or MariaDB.
+A pure-Go task orchestrator that parses YAML workflow definitions, resolves task dependencies as a DAG, executes tasks in ephemeral Docker containers, shares data across steps via a per-run workspace directory, and persists execution state and logs in SQLite, PostgreSQL, MySQL, or MariaDB. For AI and coding agents, see **[`AGENTS.md`](AGENTS.md)**.
 
 ## Features
 
@@ -291,11 +291,16 @@ curl -s -H "Authorization: Bearer $FREUD_TOKEN" http://localhost:4321/api/v1/flo
 | --- | --- | --- | --- |
 | `GET` | `/api/v1/health` | Public | Server health (`status`, `auth_enabled`, `setup_required`, `scheduler_on`) |
 | `GET` | `/api/v1/me` | Any user | Current authenticated user (`username`, `is_admin`, `created_at`) |
+| `GET` | `/api/v1/context` | Any user | Agent installation context: `.env` variable **names** only (never values), counts, sync status |
+| `GET` | `/api/v1/spec` | Any user | Canonical workflow YAML specification (`?format=raw` for Markdown) |
 | `GET` | `/api/v1/flows` | Any user | List discovered workflows in `flows/` with cron schedule and latest run |
+| `POST` | `/api/v1/flows/validate` | Any user | Validate a workflow YAML draft (`{"yaml"}`) without saving to disk |
 | `GET` | `/api/v1/flows/{file}` | Any user | Flow details, parsed task list, raw YAML, and recent runs |
 | `POST` | `/api/v1/flows/{file}/run` | Any user | Start workflow execution asynchronously (`202 Accepted` with `run_id`) |
+| `GET` | `/api/v1/includes` | Any user | List shared files under `includes/` |
+| `GET` | `/api/v1/includes/{path}` | Any user | Read a shared file under `includes/` safely |
 | `GET` | `/api/v1/executions` | Any user | Run stats + paginated runs (`?status=RUNNING\|SUCCESS\|FAILED\|KILLED&q=&limit=50&offset=0`) |
-| `GET` | `/api/v1/executions/{id}` | Any user | Execution metadata, child subflow runs, and task runs including logs |
+| `GET` | `/api/v1/executions/{id}` | Any user | Execution metadata, child subflow runs, and task runs (`?tail_lines=100` optional) |
 | `POST` | `/api/v1/executions/{id}/kill` | Any user | Terminate an active run and record `KILLED` status |
 | `GET` | `/api/v1/audit` | Any user | Paginated activity audit log (`?action=FLOW_RUN&q=&limit=100&offset=0`) |
 | `GET` | `/api/v1/users` | Any user | List registered accounts (without password hashes) |
@@ -346,16 +351,21 @@ Freud embeds a zero-dependency **MCP JSON-RPC 2.0 server** inside the same binar
 ### Exposed Tools & Resources
 
 - **Tools**:
+  - `get_context` — inspect available `.env` variable **names** (never values), counts, Git sync status, and spec URI
   - `list_flows` — list discovered YAML flows, cron schedules, and latest run status
   - `get_flow` (`{file}`) — inspect workflow tasks, dependencies, raw YAML, and recent runs
-  - `run_flow` (`{file, wait?, timeout_seconds?}`) — trigger a workflow asynchronously or wait (up to 300s) for completion & task logs
+  - `validate_flow` (`{yaml}`) — validate a draft YAML workflow without writing files
+  - `list_includes` / `get_include` (`{path}`) — inspect shared scripts in `includes/`
+  - `run_flow` (`{file, wait?, timeout_seconds?, tail_lines?}`) — trigger a workflow asynchronously or wait (up to 300s) for completion & task logs
   - `list_executions` (`{status?, q?, limit?, offset?}`) — query paginated execution history and status stats
-  - `get_execution` (`{run_id}`) — inspect execution status, `triggered_by`, child subflows, and task logs
+  - `get_execution` (`{run_id, tail_lines?}`) — inspect execution status, `triggered_by`, child subflows, and task logs
   - `kill_execution` (`{run_id}`) — terminate an active `RUNNING` execution
   - `list_audit_logs` (`{action?, q?, limit?, offset?}`) — query paginated activity audit trail
   - `sync_flows` — trigger Git repository sync now and return commit/diff summary & `run_id`
 - **Resources**:
-  - `freud://flows/{file}` (`text/yaml`) via `resources/list` and `resources/read`
+  - `freud://docs/workflow-spec` (`text/markdown`) — canonical workflow YAML specification
+  - `freud://flows/{file}` (`text/yaml`) — workflow YAML definitions
+  - `freud://includes/{path}` (`text/plain`) — shared helper files under `includes/`
 
 ### Local `stdio` Mode (`./freud mcp`)
 

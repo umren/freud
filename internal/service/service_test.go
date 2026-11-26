@@ -105,4 +105,27 @@ tasks:
 	if err != nil || auditPage.Total != 1 || len(auditPage.Logs) != 1 || auditPage.Logs[0].Source != "api" || auditPage.HasMore {
 		t.Fatalf("unexpected AuditLogsPage: %+v err=%v", auditPage, err)
 	}
+
+	// Includes listing and path-safe reading.
+	incDir := filepath.Join(tmp, "includes")
+	if err := os.MkdirAll(filepath.Join(incDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(incDir, "sub", "helper.py"), []byte("def ping():\n    return 'ok'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	incFiles, err := ListIncludes(incDir)
+	if err != nil || len(incFiles) != 1 || incFiles[0].Path != "sub/helper.py" {
+		t.Fatalf("unexpected ListIncludes: %+v err=%v", incFiles, err)
+	}
+	if _, err := ReadInclude(incDir, "../svc.db"); !errors.Is(err, ErrInvalidInclude) {
+		t.Fatalf("expected ErrInvalidInclude on traversal, got %v", err)
+	}
+	if _, err := ReadInclude(incDir, "missing.py"); !errors.Is(err, ErrIncludeNotFound) {
+		t.Fatalf("expected ErrIncludeNotFound, got %v", err)
+	}
+	incData, err := ReadInclude(incDir, "sub/helper.py")
+	if err != nil || !errors.Is(err, nil) || incData.Path != "sub/helper.py" || len(incData.Content) == 0 {
+		t.Fatalf("unexpected ReadInclude: %+v err=%v", incData, err)
+	}
 }

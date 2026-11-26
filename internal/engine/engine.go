@@ -138,6 +138,11 @@ func (e *Engine) SetEnv(baseEnv map[string]string) {
 	e.baseEnv = baseEnv
 }
 
+// EnvKeys returns the sorted names of base environment variables configured for tasks (without values).
+func (e *Engine) EnvKeys() []string {
+	return env.SortedKeys(e.baseEnv)
+}
+
 // SetFlowsDir sets the directory used to resolve subflows referenced by `flow: <name>`.
 func (e *Engine) SetFlowsDir(dir string) {
 	e.flowsDir = dir

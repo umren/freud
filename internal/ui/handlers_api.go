@@ -12,8 +12,10 @@ import (
 
 	"freud/internal/auth"
 	"freud/internal/db"
+	"freud/internal/mcp"
 	"freud/internal/service"
 	"freud/internal/syncer"
+	"freud/internal/workflow"
 )
 
 type apiErrorResponse struct {
@@ -56,9 +58,9 @@ func writeAPIError(w http.ResponseWriter, status int, msg string) {
 
 func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, service.ErrFlowNotFound), errors.Is(err, service.ErrExecutionNotFound):
+	case errors.Is(err, service.ErrFlowNotFound), errors.Is(err, service.ErrExecutionNotFound), errors.Is(err, service.ErrIncludeNotFound):
 		writeAPIError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, service.ErrInvalidFlow), errors.Is(err, service.ErrInvalidStatus):
+	case errors.Is(err, service.ErrInvalidFlow), errors.Is(err, service.ErrInvalidStatus), errors.Is(err, service.ErrInvalidInclude):
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
@@ -192,6 +194,7 @@ func (s *Server) handleAPIExecutionDetail(w http.ResponseWriter, r *http.Request
 		writeServiceError(w, err)
 		return
 	}
+	service.ApplyTailLines(detail, parseIntQueryParam(r, "tail_lines", 0))
 	writeJSON(w, http.StatusOK, detail)
 }
 
@@ -563,4 +566,99 @@ func (s *Server) handleAPIMaintenanceCleanup(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleAPISpec(w http.ResponseWriter, r *http.Request) {
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("format")), "raw") {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(workflow.SpecMarkdown))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"markdown":           workflow.SpecMarkdown,
+		"supported_runtimes": []string{workflow.RuntimePython, workflow.RuntimeJS, workflow.RuntimeShell},
+	})
+}
+
+func (s *Server) handleAPIContext(w http.ResponseWriter, r *http.Request) {
+	flows, err := service.ListFlows(r.Context(), s.store, s.cfg.FlowsDir)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	includes, err := service.ListIncludes(s.cfg.IncludesDir)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	envKeys := []string{}
+	if lister, ok := s.runner.(mcp.EnvKeyLister); ok {
+		if keys := lister.EnvKeys(); len(keys) > 0 {
+			envKeys = keys
+		}
+	}
+
+	var syncStatus any
+	if s.cfg.Syncer != nil {
+		syncStatus = s.cfg.Syncer.Status()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"env_keys":           envKeys,
+		"flows_count":        len(flows),
+		"includes_count":     len(includes),
+		"scheduler_on":       s.cfg.SchedulerOn,
+		"auth_enabled":       s.cfg.EnableAuth,
+		"sync":               syncStatus,
+		"supported_runtimes": []string{workflow.RuntimePython, workflow.RuntimeJS, workflow.RuntimeShell},
+		"workflow_spec_url":  "/api/v1/spec",
+	})
+}
+
+func (s *Server) handleAPIIncludesList(w http.ResponseWriter, _ *http.Request) {
+	files, err := service.ListIncludes(s.cfg.IncludesDir)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"includes": files})
+}
+
+func (s *Server) handleAPIIncludeDetail(w http.ResponseWriter, r *http.Request) {
+	inc, err := service.ReadInclude(s.cfg.IncludesDir, r.PathValue("path"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inc)
+}
+
+func (s *Server) handleAPIValidateFlow(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		YAML string `json:"yaml"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+		return
+	}
+	if strings.TrimSpace(req.YAML) == "" {
+		writeAPIError(w, http.StatusBadRequest, "yaml field is required")
+		return
+	}
+	wf, err := workflow.Parse([]byte(req.YAML))
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"valid": false,
+			"error": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"valid":       true,
+		"name":        wf.Name,
+		"cron":        wf.Cron,
+		"tasks_count": len(wf.Tasks),
+	})
 }

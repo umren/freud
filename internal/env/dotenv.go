@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -107,6 +108,19 @@ func LoadDefault(workflowPath string) (map[string]string, []string, error) {
 	}
 
 	return merged, loadedPaths, nil
+}
+
+// SortedKeys returns sorted environment variable names without exposing any values.
+func SortedKeys(vars map[string]string) []string {
+	if len(vars) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // MergeTaskEnv combines base environment variables (e.g. from .env) with task-specific env entries.

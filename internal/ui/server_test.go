@@ -1019,3 +1019,96 @@ func TestUIMaintenancePageAndAPI(t *testing.T) {
 		t.Fatalf("expected policy reverted to config default 30d, got pol=%+v overridden=%v", pol, overridden)
 	}
 }
+
+func TestAgentContextIncludesAndSpecAPI(t *testing.T) {
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	includesDir := filepath.Join(tmp, "includes")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(includesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(includesDir, "helper.py"), []byte("SECRET_KEY_USAGE = 'ok'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := db.Open(filepath.Join(tmp, "agent_api.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	eng := engine.New(store, nil, filepath.Join(tmp, "ws"))
+	eng.SetEnv(map[string]string{
+		"API_KEY":  "SUPER_SECRET_ENV_VALUE",
+		"ENV_NAME": "production",
+	})
+
+	srv, err := NewServer(store, Config{
+		FlowsDir:    flowsDir,
+		IncludesDir: includesDir,
+		EnableAuth:  false,
+		Runner:      eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	// 1. /api/v1/spec returns workflow specification (JSON & raw markdown).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/spec", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Freud Workflow YAML Specification") {
+		t.Fatalf("unexpected /api/v1/spec: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 2. /api/v1/context returns ONLY sorted env_keys names and NEVER values.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/context", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(body, `"API_KEY"`) || !strings.Contains(body, `"ENV_NAME"`) ||
+		strings.Contains(body, "SUPER_SECRET_ENV_VALUE") || strings.Contains(body, "production") {
+		t.Fatalf("unexpected or leaky /api/v1/context: code=%d body=%s", rec.Code, body)
+	}
+
+	// 3. /api/v1/includes and /api/v1/includes/{path...} list and read shared files safely.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/includes", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "helper.py") {
+		t.Fatalf("unexpected /api/v1/includes: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/includes/helper.py", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "SECRET_KEY_USAGE") {
+		t.Fatalf("unexpected /api/v1/includes/helper.py: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/includes/..%2Fagent_api.db", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on include traversal, got %d", rec.Code)
+	}
+
+	// 4. POST /api/v1/flows/validate checks drafts without creating files.
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/flows/validate", strings.NewReader(`{"yaml":"name: check-flow\ntasks:\n  - id: s1\n    runtime: python\n    script: print(1)"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"valid": true`) {
+		t.Fatalf("expected 200 valid flow draft, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/flows/validate", strings.NewReader(`{"yaml":"name: bad\ntasks: []"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), `"valid": false`) {
+		t.Fatalf("expected 422 invalid flow draft, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

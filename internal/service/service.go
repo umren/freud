@@ -352,6 +352,24 @@ func GetExecutionDetail(ctx context.Context, store *db.Store, runID string) (*Ex
 	}, nil
 }
 
+// ApplyTailLines truncates each task's logs to the last tailLines lines when tailLines > 0.
+func ApplyTailLines(detail *ExecutionDetail, tailLines int) {
+	if detail == nil || tailLines <= 0 {
+		return
+	}
+	for i := range detail.Tasks {
+		logs := detail.Tasks[i].Logs
+		if logs == "" {
+			continue
+		}
+		lines := strings.Split(strings.TrimRight(logs, "\n"), "\n")
+		if len(lines) > tailLines {
+			omitted := len(lines) - tailLines
+			detail.Tasks[i].Logs = fmt.Sprintf("... (%d earlier lines omitted)\n%s", omitted, strings.Join(lines[len(lines)-tailLines:], "\n"))
+		}
+	}
+}
+
 // ListAuditLogs returns paginated audit log DTOs filtered optionally by action and search string.
 func ListAuditLogs(ctx context.Context, store *db.Store, limit, offset, defLimit, maxLimit int, actionFilter, search string) (*AuditLogsPage, error) {
 	if offset < 0 {

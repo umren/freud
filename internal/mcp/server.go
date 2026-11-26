@@ -30,13 +30,20 @@ type KillableFlowRunner interface {
 	Kill(runID string) error
 }
 
+// EnvKeyLister optionally exposes configured .env variable names (never values).
+type EnvKeyLister interface {
+	EnvKeys() []string
+}
+
 // Config configures the Freud MCP server.
 type Config struct {
-	FlowsDir string
-	Runner   FlowRunner
-	Syncer   *syncer.Syncer
-	RunCtx   context.Context
-	OnLog    func(format string, args ...any)
+	FlowsDir    string
+	IncludesDir string
+	Runner      FlowRunner
+	Syncer      *syncer.Syncer
+	EnvKeys     []string
+	RunCtx      context.Context
+	OnLog       func(format string, args ...any)
 }
 
 type actorCtxKey string
@@ -126,6 +133,9 @@ type textContent struct {
 func NewServer(store *db.Store, cfg Config) *Server {
 	if strings.TrimSpace(cfg.FlowsDir) == "" {
 		cfg.FlowsDir = "flows"
+	}
+	if strings.TrimSpace(cfg.IncludesDir) == "" {
+		cfg.IncludesDir = "includes"
 	}
 	runCtx := cfg.RunCtx
 	if runCtx == nil {
@@ -336,7 +346,7 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 				"name":    "freud",
 				"version": "0.1.0",
 			},
-			"instructions": "Freud container workflow orchestrator. Inspect YAML flows (list_flows, get_flow), trigger executions (run_flow), read status and task logs (list_executions, get_execution), kill active runs (kill_execution), and query user/agent audit logs (list_audit_logs).",
+			"instructions": "Freud container workflow orchestrator. Read freud://docs/workflow-spec for YAML schema, call get_context for .env keys and installation status, inspect flows (list_flows, get_flow) and includes (list_includes, get_include), validate drafts (validate_flow), run/kill pipelines (run_flow, get_execution with tail_lines, kill_execution), sync Git repos (sync_flows), and check audit logs (list_audit_logs).",
 		}, nil
 
 	case "notifications/initialized":
@@ -377,7 +387,7 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 		}, nil
 
 	case "resources/list":
-		resources, err := s.listFlowResources()
+		resources, err := s.listResources()
 		if err != nil {
 			return nil, &jsonRPCError{Code: -32603, Message: err.Error()}
 		}
@@ -390,7 +400,7 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 		if len(params) == 0 || json.Unmarshal(params, &p) != nil || strings.TrimSpace(p.URI) == "" {
 			return nil, &jsonRPCError{Code: -32602, Message: "invalid resources/read params: uri required"}
 		}
-		contents, err := s.readFlowResource(p.URI)
+		contents, err := s.readResource(p.URI)
 		if err != nil {
 			return nil, &jsonRPCError{Code: -32602, Message: err.Error()}
 		}

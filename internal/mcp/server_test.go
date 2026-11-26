@@ -223,3 +223,86 @@ func TestMCPHTTPAndKillTool(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPIncludesSpecEnvContextAndTail(t *testing.T) {
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	includesDir := filepath.Join(tmp, "includes")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(includesDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(flowsDir, "demo.yaml"), []byte("name: demo\ntasks:\n  - id: s1\n    runtime: python\n    script: print(1)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(includesDir, "sub", "helper.py"), []byte("def greet():\n    return 'hi'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := db.Open(filepath.Join(tmp, "ctx.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Populate multi-line task logs to test tail_lines truncation.
+	ctx := context.Background()
+	_ = store.CreateRunFull(ctx, "long-run", "demo", "", "", "", "local")
+	trID, _ := store.CreateTaskRunWithMeta(ctx, "long-run", "s1", "python", "python:3.13")
+	_ = store.FinishTaskRun(ctx, trID, db.StatusSuccess, 0, "line1\nline2\nline3\nline4\nline5\n")
+	_ = store.FinishRun(ctx, "long-run", db.StatusSuccess)
+
+	// Guard secret value never appears in get_context output.
+	t.Setenv("FREUD_TEST_ONLY_SECRET_VAL", "SHOULD_NOT_APPEAR")
+
+	srv := NewServer(store, Config{
+		FlowsDir:    flowsDir,
+		IncludesDir: includesDir,
+		EnvKeys:     []string{"API_KEY", "ENV_NAME"},
+	})
+
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"resources/list"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"freud://docs/workflow-spec"}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"freud://includes/sub/helper.py"}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_includes","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_include","arguments":{"path":"includes/sub/helper.py"}}}`,
+		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"validate_flow","arguments":{"yaml":"name: draft\ntasks:\n  - id: a\n    runtime: python\n    script: print(1)"}}}`,
+		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"validate_flow","arguments":{"yaml":"name: bad\ntasks: []"}}}`,
+		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"get_context","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_execution","arguments":{"run_id":"long-run","tail_lines":2}}}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := srv.ServeStdio(ctx, strings.NewReader(input), &out); err != nil {
+		t.Fatalf("ServeStdio failed: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 9 {
+		t.Fatalf("expected 9 responses, got %d:\n%s", len(lines), out.String())
+	}
+
+	if !strings.Contains(lines[0], "freud://docs/workflow-spec") || !strings.Contains(lines[0], "freud://includes/sub/helper.py") {
+		t.Fatalf("resources/list missing spec or include URI: %s", lines[0])
+	}
+	if !strings.Contains(lines[1], "Freud Workflow YAML Specification") {
+		t.Fatalf("workflow-spec resource missing spec title: %s", lines[1])
+	}
+	if !strings.Contains(lines[2], "def greet()") {
+		t.Fatalf("include resource missing helper.py content: %s", lines[2])
+	}
+	if !strings.Contains(lines[3], "sub/helper.py") || !strings.Contains(lines[4], "def greet()") {
+		t.Fatalf("list_includes / get_include mismatch: %s | %s", lines[3], lines[4])
+	}
+	if !strings.Contains(lines[5], `\"valid\": true`) || !strings.Contains(lines[6], `\"valid\": false`) {
+		t.Fatalf("validate_flow mismatch: valid=%s invalid=%s", lines[5], lines[6])
+	}
+	if !strings.Contains(lines[7], "API_KEY") || !strings.Contains(lines[7], "ENV_NAME") || strings.Contains(lines[7], "SHOULD_NOT_APPEAR") {
+		t.Fatalf("get_context unexpected env_keys: %s", lines[7])
+	}
+	if !strings.Contains(lines[8], "earlier lines omitted") || !strings.Contains(lines[8], "line5") || strings.Contains(lines[8], "line1") {
+		t.Fatalf("get_execution tail_lines=2 failed: %s", lines[8])
+	}
+}

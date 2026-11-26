@@ -16,9 +16,11 @@ import (
 )
 
 const (
-	flowResourcePrefix = "freud://flows/"
-	maxWaitSeconds     = 300
-	defaultWaitSeconds = 60
+	flowResourcePrefix    = "freud://flows/"
+	includeResourcePrefix = "freud://includes/"
+	workflowSpecURI       = "freud://docs/workflow-spec"
+	maxWaitSeconds        = 300
+	defaultWaitSeconds    = 60
 )
 
 func (s *Server) registerTools() {
@@ -65,6 +67,10 @@ func (s *Server) registerTools() {
 					"type":        "integer",
 					"description": "Maximum seconds to wait when wait=true (default 60, max 300).",
 				},
+				"tail_lines": map[string]any{
+					"type":        "integer",
+					"description": "Optional limit to return only the last N log lines per task when wait=true.",
+				},
 			},
 			"required": []string{"file"},
 		},
@@ -106,6 +112,10 @@ func (s *Server) registerTools() {
 				"run_id": map[string]any{
 					"type":        "string",
 					"description": "Execution ID (e.g. 20261124-120000-ab12cd34).",
+				},
+				"tail_lines": map[string]any{
+					"type":        "integer",
+					"description": "Optional: return only the last N log lines per task to keep context compact.",
 				},
 			},
 			"required": []string{"run_id"},
@@ -162,6 +172,56 @@ func (s *Server) registerTools() {
 			"additionalProperties": false,
 		},
 	}, s.toolSyncFlows)
+
+	s.registerTool(ToolDefinition{
+		Name:        "list_includes",
+		Description: "List shared helper files inside the includes directory (mounted read-only at /includes in containers).",
+		InputSchema: map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{},
+			"additionalProperties": false,
+		},
+	}, s.toolListIncludes)
+
+	s.registerTool(ToolDefinition{
+		Name:        "get_include",
+		Description: "Read the contents of a shared file from the includes directory (max 512 KiB).",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Relative path inside includes/ (e.g. payload_utils.py or includes/payload_utils.py).",
+				},
+			},
+			"required": []string{"path"},
+		},
+	}, s.toolGetInclude)
+
+	s.registerTool(ToolDefinition{
+		Name:        "validate_flow",
+		Description: "Parse and validate a workflow YAML draft (fields, cron expression, include paths, DAG cycles) without modifying files.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"yaml": map[string]any{
+					"type":        "string",
+					"description": "Raw workflow YAML text to validate.",
+				},
+			},
+			"required": []string{"yaml"},
+		},
+	}, s.toolValidateFlow)
+
+	s.registerTool(ToolDefinition{
+		Name:        "get_context",
+		Description: "Return installation context for agents: available .env variable NAMES only (never values), flows/includes counts, Git sync status, and workflow YAML spec resource URI.",
+		InputSchema: map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{},
+			"additionalProperties": false,
+		},
+	}, s.toolGetContext)
 }
 
 func decodeArgs(raw json.RawMessage, dst any) error {
@@ -197,6 +257,7 @@ func (s *Server) toolRunFlow(ctx context.Context, raw json.RawMessage) (any, err
 		File           string `json:"file"`
 		Wait           bool   `json:"wait"`
 		TimeoutSeconds int    `json:"timeout_seconds"`
+		TailLines      int    `json:"tail_lines"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return nil, err
@@ -257,6 +318,7 @@ func (s *Server) toolRunFlow(ctx context.Context, raw json.RawMessage) (any, err
 	if err != nil {
 		return nil, err
 	}
+	service.ApplyTailLines(detail, args.TailLines)
 	return struct {
 		*service.ExecutionDetail
 		TimedOut bool `json:"timed_out"`
@@ -281,12 +343,18 @@ func (s *Server) toolListExecutions(ctx context.Context, raw json.RawMessage) (a
 
 func (s *Server) toolGetExecution(ctx context.Context, raw json.RawMessage) (any, error) {
 	var args struct {
-		RunID string `json:"run_id"`
+		RunID     string `json:"run_id"`
+		TailLines int    `json:"tail_lines"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
 		return nil, err
 	}
-	return service.GetExecutionDetail(ctx, s.store, args.RunID)
+	detail, err := service.GetExecutionDetail(ctx, s.store, args.RunID)
+	if err != nil {
+		return nil, err
+	}
+	service.ApplyTailLines(detail, args.TailLines)
+	return detail, nil
 }
 
 func (s *Server) toolKillExecution(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -360,12 +428,99 @@ func (s *Server) toolSyncFlows(ctx context.Context, _ json.RawMessage) (any, err
 	return res, nil
 }
 
-func (s *Server) listFlowResources() ([]map[string]any, error) {
+func (s *Server) toolListIncludes(_ context.Context, _ json.RawMessage) (any, error) {
+	files, err := service.ListIncludes(s.cfg.IncludesDir)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"includes": files}, nil
+}
+
+func (s *Server) toolGetInclude(_ context.Context, raw json.RawMessage) (any, error) {
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := decodeArgs(raw, &args); err != nil {
+		return nil, err
+	}
+	return service.ReadInclude(s.cfg.IncludesDir, args.Path)
+}
+
+func (s *Server) toolValidateFlow(_ context.Context, raw json.RawMessage) (any, error) {
+	var args struct {
+		YAML string `json:"yaml"`
+	}
+	if err := decodeArgs(raw, &args); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(args.YAML) == "" {
+		return nil, fmt.Errorf("yaml field is required")
+	}
+	wf, err := workflow.Parse([]byte(args.YAML))
+	if err != nil {
+		return map[string]any{
+			"valid": false,
+			"error": err.Error(),
+		}, nil
+	}
+	return map[string]any{
+		"valid":       true,
+		"name":        wf.Name,
+		"cron":        wf.Cron,
+		"tasks_count": len(wf.Tasks),
+	}, nil
+}
+
+func (s *Server) envKeys() []string {
+	if lister, ok := s.cfg.Runner.(EnvKeyLister); ok {
+		if keys := lister.EnvKeys(); len(keys) > 0 {
+			return keys
+		}
+	}
+	return s.cfg.EnvKeys
+}
+
+func (s *Server) toolGetContext(ctx context.Context, _ json.RawMessage) (any, error) {
+	flows, err := service.ListFlows(ctx, s.store, s.cfg.FlowsDir)
+	if err != nil {
+		return nil, err
+	}
+	includes, err := service.ListIncludes(s.cfg.IncludesDir)
+	if err != nil {
+		return nil, err
+	}
+	var syncStatus any
+	if s.cfg.Syncer != nil {
+		syncStatus = s.cfg.Syncer.Status()
+	}
+	envKeys := s.envKeys()
+	if envKeys == nil {
+		envKeys = []string{}
+	}
+	return map[string]any{
+		"env_keys":           envKeys,
+		"flows_count":        len(flows),
+		"includes_count":     len(includes),
+		"sync":               syncStatus,
+		"workflow_spec_uri":  workflowSpecURI,
+		"supported_runtimes": []string{workflow.RuntimePython, workflow.RuntimeJS, workflow.RuntimeShell},
+	}, nil
+}
+
+func (s *Server) listResources() ([]map[string]any, error) {
+	out := []map[string]any{
+		{
+			"uri":         workflowSpecURI,
+			"name":        "workflow-spec",
+			"description": "Freud Workflow YAML Specification & container runtime conventions",
+			"mimeType":    "text/markdown",
+		},
+	}
+
 	entries, err := workflow.LoadDir(s.cfg.FlowsDir)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]map[string]any, 0, len(entries))
 	for _, e := range entries {
 		if e.ParseErr != nil || e.Workflow == nil {
 			continue
@@ -377,10 +532,46 @@ func (s *Server) listFlowResources() ([]map[string]any, error) {
 			"mimeType":    "text/yaml",
 		})
 	}
+
+	includes, err := service.ListIncludes(s.cfg.IncludesDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, inc := range includes {
+		out = append(out, map[string]any{
+			"uri":         includeResourcePrefix + inc.Path,
+			"name":        "include:" + inc.Path,
+			"description": fmt.Sprintf("Shared include file (%d bytes)", inc.Size),
+			"mimeType":    "text/plain",
+		})
+	}
 	return out, nil
 }
 
-func (s *Server) readFlowResource(uri string) ([]map[string]any, error) {
+func (s *Server) readResource(uri string) ([]map[string]any, error) {
+	if uri == workflowSpecURI {
+		return []map[string]any{
+			{
+				"uri":      workflowSpecURI,
+				"mimeType": "text/markdown",
+				"text":     workflow.SpecMarkdown,
+			},
+		}, nil
+	}
+	if strings.HasPrefix(uri, includeResourcePrefix) {
+		rel := strings.TrimPrefix(uri, includeResourcePrefix)
+		inc, err := service.ReadInclude(s.cfg.IncludesDir, rel)
+		if err != nil {
+			return nil, err
+		}
+		return []map[string]any{
+			{
+				"uri":      includeResourcePrefix + inc.Path,
+				"mimeType": "text/plain",
+				"text":     inc.Content,
+			},
+		}, nil
+	}
 	if !strings.HasPrefix(uri, flowResourcePrefix) {
 		return nil, fmt.Errorf("unsupported resource URI %q", uri)
 	}
