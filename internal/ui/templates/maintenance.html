@@ -1,0 +1,133 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">Maintenance &amp; Retention</h1>
+    <p class="page-sub">Storage footprint and optional age-based cleanup for runs, logs, workspaces, audit logs, and Docker cache</p>
+  </div>
+</div>
+
+{{if .FlashMsg}}
+<div class="alert-success">{{.FlashMsg}}</div>
+{{end}}
+{{if .FlashErr}}
+<div class="alert-error">{{.FlashErr}}</div>
+{{end}}
+
+<div class="stats" style="margin-bottom:18px">
+  <div class="stat">
+    <div class="stat-label">Runs / Task Runs</div>
+    <div class="stat-value mono">{{.Report.DB.Runs}} / {{.Report.DB.TaskRuns}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Audit Logs / Sessions</div>
+    <div class="stat-value mono">{{.Report.DB.AuditLogs}} / {{.Report.DB.Sessions}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Workspaces ({{.Report.WorkspaceDirs}} dirs)</div>
+    <div class="stat-value mono">{{.WorkspacesSize}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">DB Footprint ({{.Report.DB.Dialect}})</div>
+    <div class="stat-value mono">{{if .DBSize}}{{.DBSize}}{{else}}external{{end}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Docker Cache ({{.Report.CacheImagesCount}})</div>
+    <div class="stat-value mono">{{if .Report.CacheAvailable}}{{.CacheSize}}{{else}}n/a{{end}}</div>
+  </div>
+</div>
+
+<div class="grid-2" style="margin-bottom:18px">
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Retention Policy</h2>
+      {{if .Report.UsingUIOverrides}}
+        <span class="badge badge-accent">UI Override</span>
+      {{else}}
+        <span class="badge badge-neutral">Config Default</span>
+      {{end}}
+    </div>
+    <div class="card-body">
+      <p class="muted" style="font-size:12px;margin:0 0 14px">
+        Set days to <span class="mono">0</span> to keep data indefinitely. Active <span class="mono">RUNNING</span> workflows and their workspaces are never deleted. Periodic interval: <span class="mono">{{if .Report.Interval}}{{.Report.Interval}}{{else}}disabled{{end}}</span>.
+      </p>
+      {{if or (not .AuthEnabled) (and .CurrentUser .CurrentUser.IsAdmin)}}
+      <form method="post" action="/maintenance/settings" class="auth-form">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+          <label style="display:block;font-size:12px">
+            <span class="muted">Runs &amp; Task Logs (days)</span>
+            <input class="input" style="width:100%;margin-top:4px" type="number" min="0" name="runs_days" value="{{.Report.Policy.RunsDays}}" required>
+          </label>
+          <label style="display:block;font-size:12px">
+            <span class="muted">Workspaces on disk (days)</span>
+            <input class="input" style="width:100%;margin-top:4px" type="number" min="0" name="workspaces_days" value="{{.Report.Policy.WorkspacesDays}}" required>
+          </label>
+          <label style="display:block;font-size:12px">
+            <span class="muted">Audit Log (days)</span>
+            <input class="input" style="width:100%;margin-top:4px" type="number" min="0" name="audit_days" value="{{.Report.Policy.AuditDays}}" required>
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;padding-top:18px">
+            <input type="checkbox" name="vacuum_sqlite" value="1" {{if .Report.Policy.VacuumSQLite}}checked{{end}}>
+            <span>Run SQLite <span class="mono">VACUUM</span> after cleanup</span>
+          </label>
+        </div>
+        <div class="toolbar">
+          <button type="submit" class="btn btn-primary">Save Policy</button>
+        </div>
+      </form>
+      {{if .Report.UsingUIOverrides}}
+      <form method="post" action="/maintenance/reset" style="margin-top:10px">
+        <button type="submit" class="btn">Reset to Config Defaults (runs={{.Report.Defaults.RunsDays}}d, ws={{.Report.Defaults.WorkspacesDays}}d, audit={{.Report.Defaults.AuditDays}}d)</button>
+      </form>
+      {{end}}
+      {{else}}
+      <div class="muted" style="font-size:13px">
+        Current policy: <span class="mono">runs={{.Report.Policy.RunsDays}}d</span>,
+        <span class="mono">workspaces={{.Report.Policy.WorkspacesDays}}d</span>,
+        <span class="mono">audit={{.Report.Policy.AuditDays}}d</span>
+        (admin privileges required to edit).
+      </div>
+      {{end}}
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Cleanup Actions &amp; Last Run</h2>
+    </div>
+    <div class="card-body">
+      {{if or (not .AuthEnabled) (and .CurrentUser .CurrentUser.IsAdmin)}}
+      <div class="toolbar" style="margin-bottom:14px">
+        <form method="post" action="/maintenance/run" style="margin:0">
+          <button type="submit" class="btn btn-primary">Run Cleanup Now</button>
+        </form>
+        {{if .Report.CacheAvailable}}
+        <form method="post" action="/maintenance/cache/clear" style="margin:0">
+          <button type="submit" class="btn btn-danger">Clear Docker Cache ({{.Report.CacheImagesCount}})</button>
+        </form>
+        {{end}}
+      </div>
+      {{end}}
+
+      {{if .Report.CacheErr}}
+      <div class="alert-error" style="margin-bottom:12px">Docker cache check failed: {{.Report.CacheErr}}</div>
+      {{end}}
+
+      {{if .Report.LastResult}}
+      <div style="font-size:12px;line-height:1.7">
+        <div><span class="muted">Last pass:</span> <span class="mono">{{.LastRunAt}}</span> (<span class="mono">{{.Report.LastResult.Trigger}}</span>)</div>
+        <div class="mono">
+          runs={{.Report.LastResult.DeletedRuns}} ·
+          task_runs={{.Report.LastResult.DeletedTaskRuns}} ·
+          workspaces={{.Report.LastResult.RemovedWorkspaces}} ({{.LastReclaimed}}) ·
+          audit={{.Report.LastResult.DeletedAuditLogs}} ·
+          sessions={{.Report.LastResult.DeletedSessions}}
+          {{if .Report.LastResult.Vacuumed}} · vacuum=yes{{end}}
+        </div>
+      </div>
+      {{else}}
+      <div class="muted" style="font-size:13px">No cleanup pass executed in this server session yet.</div>
+      {{end}}
+    </div>
+  </section>
+</div>
+{{end}}

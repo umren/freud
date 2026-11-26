@@ -17,14 +17,15 @@ const (
 	// DefaultConfigFile is the optional TOML configuration filename checked in the current directory.
 	DefaultConfigFile = "freud.toml"
 
-	DefaultDBPath        = "orchestrator.db"
-	DefaultWorkspacesDir = "workspaces"
-	DefaultFlowsDir      = "flows"
-	DefaultIncludesDir   = "includes"
-	DefaultDreamPort     = 4321
-	DefaultSyncBranch    = "main"
-	DefaultSyncInterval  = "10m"
-	DefaultSyncCacheDir  = ".freud-sync"
+	DefaultDBPath            = "orchestrator.db"
+	DefaultWorkspacesDir     = "workspaces"
+	DefaultFlowsDir          = "flows"
+	DefaultIncludesDir       = "includes"
+	DefaultDreamPort         = 4321
+	DefaultSyncBranch        = "main"
+	DefaultSyncInterval      = "10m"
+	DefaultSyncCacheDir      = ".freud-sync"
+	DefaultRetentionInterval = "6h"
 )
 
 // StringList accepts either a single TOML string or a string array.
@@ -86,19 +87,29 @@ type SyncConfig struct {
 	WebhookSecret string     `toml:"webhook_secret"`
 }
 
+// RetentionConfig configures automatic cleanup policies for old runs, logs, workspaces, and audit history.
+type RetentionConfig struct {
+	Interval       string `toml:"interval"`
+	RunsDays       int    `toml:"runs_days"`
+	WorkspacesDays int    `toml:"workspaces_days"`
+	AuditDays      int    `toml:"audit_days"`
+	VacuumSQLite   bool   `toml:"vacuum_sqlite"`
+}
+
 // Config holds runtime paths and behavior settings for Freud.
 type Config struct {
-	ConfigFile       string      `toml:"-"`
-	FlowsDirExplicit bool        `toml:"-"`
-	DB               string      `toml:"db"`
-	WorkspacesDir    string      `toml:"workspaces_dir"`
-	FlowsDir         string      `toml:"flows_dir"`
-	IncludesDir      string      `toml:"includes_dir"`
-	EnvFile          string      `toml:"env_file"`
-	NoCache          bool        `toml:"no_cache"`
-	Dream            DreamConfig `toml:"dream"`
-	TUI              TUIConfig   `toml:"tui"`
-	Sync             SyncConfig  `toml:"sync"`
+	ConfigFile       string          `toml:"-"`
+	FlowsDirExplicit bool            `toml:"-"`
+	DB               string          `toml:"db"`
+	WorkspacesDir    string          `toml:"workspaces_dir"`
+	FlowsDir         string          `toml:"flows_dir"`
+	IncludesDir      string          `toml:"includes_dir"`
+	EnvFile          string          `toml:"env_file"`
+	NoCache          bool            `toml:"no_cache"`
+	Dream            DreamConfig     `toml:"dream"`
+	TUI              TUIConfig       `toml:"tui"`
+	Sync             SyncConfig      `toml:"sync"`
+	Retention        RetentionConfig `toml:"retention"`
 }
 
 // Overrides carries optional explicitly-passed CLI flag overrides.
@@ -130,6 +141,9 @@ func Default() Config {
 			Interval:  DefaultSyncInterval,
 			CacheDir:  DefaultSyncCacheDir,
 			FlowsPath: StringList{DefaultFlowsDir},
+		},
+		Retention: RetentionConfig{
+			Interval: DefaultRetentionInterval,
 		},
 	}
 }
@@ -207,6 +221,18 @@ func (c Config) Validate() error {
 				return err
 			}
 		}
+	}
+	if iv := strings.TrimSpace(c.Retention.Interval); iv != "" {
+		d, err := time.ParseDuration(iv)
+		if err != nil {
+			return fmt.Errorf("invalid retention.interval %q: %w", iv, err)
+		}
+		if d < 0 {
+			return fmt.Errorf("retention.interval must be >= 0 (got %q)", iv)
+		}
+	}
+	if c.Retention.RunsDays < 0 || c.Retention.WorkspacesDays < 0 || c.Retention.AuditDays < 0 {
+		return fmt.Errorf("retention day limits must be >= 0")
 	}
 	return nil
 }
@@ -402,6 +428,37 @@ func applyEnvVars(cfg *Config) error {
 	}
 	if v := strings.TrimSpace(os.Getenv("FREUD_SYNC_WEBHOOK_SECRET")); v != "" {
 		cfg.Sync.WebhookSecret = v
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_RETENTION_INTERVAL")); v != "" {
+		cfg.Retention.Interval = v
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_RETENTION_RUNS_DAYS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("invalid FREUD_RETENTION_RUNS_DAYS %q: %w", v, err)
+		}
+		cfg.Retention.RunsDays = n
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_RETENTION_WORKSPACES_DAYS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("invalid FREUD_RETENTION_WORKSPACES_DAYS %q: %w", v, err)
+		}
+		cfg.Retention.WorkspacesDays = n
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_RETENTION_AUDIT_DAYS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("invalid FREUD_RETENTION_AUDIT_DAYS %q: %w", v, err)
+		}
+		cfg.Retention.AuditDays = n
+	}
+	if v := strings.TrimSpace(os.Getenv("FREUD_RETENTION_VACUUM_SQLITE")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid FREUD_RETENTION_VACUUM_SQLITE %q: %w", v, err)
+		}
+		cfg.Retention.VacuumSQLite = b
 	}
 	return nil
 }

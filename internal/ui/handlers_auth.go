@@ -602,11 +602,11 @@ func clientRateKey(r *http.Request, username string) string {
 
 func auditActionSlug(action string) string {
 	switch strings.ToUpper(strings.TrimSpace(action)) {
-	case "FLOW_RUN", "SETUP_ADMIN", "USER_CREATED", "TOKEN_CREATED", "FLOW_SYNC":
+	case "FLOW_RUN", "SETUP_ADMIN", "USER_CREATED", "TOKEN_CREATED", "FLOW_SYNC", "RETENTION_CLEANUP":
 		return "success"
-	case "FLOW_KILL", "USER_DELETED", "TOKEN_REVOKED", "FLOW_SYNC_FAILED":
+	case "FLOW_KILL", "USER_DELETED", "TOKEN_REVOKED", "FLOW_SYNC_FAILED", "CACHE_CLEARED":
 		return "killed"
-	case "LOGIN", "PASSWORD_CHANGED":
+	case "LOGIN", "PASSWORD_CHANGED", "RETENTION_UPDATED":
 		return "running"
 	default:
 		return "neutral"

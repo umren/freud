@@ -21,6 +21,7 @@ import (
 	"freud/internal/engine"
 	"freud/internal/env"
 	"freud/internal/format"
+	"freud/internal/maintenance"
 	"freud/internal/mcp"
 	"freud/internal/runner"
 	"freud/internal/syncer"
@@ -322,6 +323,21 @@ func runDreamCmd(args []string) error {
 		)
 	}
 
+	maintSvc, err := maintenance.New(rt.store, cfg.WorkspacesDir, cfg.Retention, rt.dockerRunner)
+	if err != nil {
+		return err
+	}
+	go maintSvc.RunPeriodic(ctx)
+	if cfg.Retention.RunsDays > 0 || cfg.Retention.WorkspacesDays > 0 || cfg.Retention.AuditDays > 0 {
+		fmt.Printf("%s Retention enabled (runs=%dd, workspaces=%dd, audit=%dd, every %s)\n",
+			term.Tag(c, "retention"),
+			cfg.Retention.RunsDays,
+			cfg.Retention.WorkspacesDays,
+			cfg.Retention.AuditDays,
+			term.Bold(c, cfg.Retention.Interval),
+		)
+	}
+
 	addr := fmt.Sprintf(":%d", cfg.Dream.Port)
 	uiServer, err := ui.NewServer(rt.store, ui.Config{
 		Addr:        addr,
@@ -331,6 +347,7 @@ func runDreamCmd(args []string) error {
 		EnableAuth:  enableAuth,
 		Runner:      rt.eng,
 		Syncer:      gitSyncer,
+		Maintenance: maintSvc,
 		RunCtx:      ctx,
 	})
 	if err != nil {

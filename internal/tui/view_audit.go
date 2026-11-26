@@ -9,7 +9,7 @@ import (
 	"freud/internal/format"
 )
 
-var auditActionFilters = []string{"", "LOGIN", "LOGOUT", "FLOW_RUN", "FLOW_KILL", "USER_CREATED", "USER_DELETED", "TOKEN_CREATED", "TOKEN_REVOKED", "FLOW_SYNC", "FLOW_SYNC_FAILED", "SETUP_ADMIN"}
+var auditActionFilters = []string{"", "LOGIN", "LOGOUT", "FLOW_RUN", "FLOW_KILL", "USER_CREATED", "USER_DELETED", "TOKEN_CREATED", "TOKEN_REVOKED", "FLOW_SYNC", "FLOW_SYNC_FAILED", "RETENTION_CLEANUP", "RETENTION_UPDATED", "CACHE_CLEARED", "SETUP_ADMIN"}
 
 func (m *Model) currentAuditFilter() string {
 	return auditActionFilters[m.auditFilterIdx]

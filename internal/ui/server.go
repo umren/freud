@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"freud/internal/auth"
+	"freud/internal/config"
 	"freud/internal/db"
+	"freud/internal/maintenance"
 	"freud/internal/mcp"
 	"freud/internal/syncer"
 	"freud/internal/workflow"
@@ -39,6 +41,7 @@ type Config struct {
 	EnableAuth  bool
 	Runner      AsyncFlowRunner
 	Syncer      *syncer.Syncer
+	Maintenance *maintenance.Service
 	RunCtx      context.Context
 }
 
@@ -50,6 +53,7 @@ type Server struct {
 	runCtx    context.Context
 	limiter   *auth.LoginLimiter
 	mcpSrv    *mcp.Server
+	maint     *maintenance.Service
 	wg        sync.WaitGroup
 	pages     map[string]*template.Template
 	partials  *template.Template
@@ -91,6 +95,7 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 		"includes":         {"templates/layout.html", "templates/includes.html"},
 		"api":              {"templates/layout.html", "templates/api.html"},
 		"audit":            {"templates/layout.html", "templates/audit.html"},
+		"maintenance":      {"templates/layout.html", "templates/maintenance.html"},
 		"setup":            {"templates/auth_layout.html", "templates/setup.html"},
 		"login":            {"templates/auth_layout.html", "templates/login.html"},
 	}
@@ -120,12 +125,21 @@ func NewServer(store *db.Store, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("open embedded static fs: %w", err)
 	}
 
+	maintSvc := cfg.Maintenance
+	if maintSvc == nil {
+		maintSvc, err = maintenance.New(store, config.DefaultWorkspacesDir, config.Default().Retention, nil)
+		if err != nil {
+			return nil, fmt.Errorf("init maintenance service: %w", err)
+		}
+	}
+
 	return &Server{
 		store:   store,
 		cfg:     cfg,
 		runner:  cfg.Runner,
 		runCtx:  runCtx,
 		limiter: auth.NewLoginLimiter(10, 5*time.Minute),
+		maint:   maintSvc,
 		mcpSrv: mcp.NewServer(store, mcp.Config{
 			FlowsDir: cfg.FlowsDir,
 			Runner:   cfg.Runner,
@@ -161,6 +175,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /includes", s.handleIncludes)
 	mux.HandleFunc("GET /api", s.handleAPIDocsPage)
 	mux.HandleFunc("GET /audit", s.handleAuditPage)
+	mux.HandleFunc("GET /maintenance", s.handleMaintenancePage)
+	mux.HandleFunc("POST /maintenance/settings", s.handleSaveMaintenanceSettings)
+	mux.HandleFunc("POST /maintenance/reset", s.handleResetMaintenanceSettings)
+	mux.HandleFunc("POST /maintenance/run", s.handleRunMaintenanceCleanup)
+	mux.HandleFunc("POST /maintenance/cache/clear", s.handleClearMaintenanceCache)
 	mux.HandleFunc("POST /users", s.handleCreateUser)
 	mux.HandleFunc("POST /users/{username}/delete", s.handleDeleteUser)
 	mux.HandleFunc("POST /account/password", s.handleChangePassword)
@@ -185,6 +204,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tokens", s.handleAPITokensList)
 	mux.HandleFunc("POST /api/v1/tokens", s.handleAPICreateToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.handleAPIDeleteToken)
+	mux.HandleFunc("GET /api/v1/maintenance", s.handleAPIMaintenanceStatus)
+	mux.HandleFunc("POST /api/v1/maintenance/cleanup", s.handleAPIMaintenanceCleanup)
 	mux.HandleFunc("POST /webhooks/sync", s.handleSyncWebhook)
 	mux.HandleFunc("/mcp", s.handleMCP)
 	return s.authMiddleware(mux)

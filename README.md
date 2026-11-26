@@ -43,6 +43,8 @@ A pure-Go task orchestrator that parses YAML workflow definitions, resolves task
     ├── term/               # Terminal ANSI color formatting and ASCII startup banner
     ├── tui/                # Interactive Bubbletea terminal UI (dashboard, flows, logs, run/kill)
     ├── service/            # Shared query helpers and JSON DTOs used by REST API and MCP
+    ├── syncer/             # Git repository flow/include synchronization + push webhooks
+    ├── maintenance/        # Retention cleanup (runs, logs, workspaces, audit, sessions, Docker cache)
     ├── mcp/                # Model Context Protocol (MCP) server (stdio & Streamable HTTP)
     └── ui/                 # Embedded web UI, REST API v1, and HTTP /mcp endpoint
 ```
@@ -95,13 +97,14 @@ Start the embedded Web UI (default port `4321`, authentication enabled by defaul
 
 On the very first launch of `./freud dream` (when no admin user exists yet), opening the UI automatically redirects to **`/setup`** in your browser to create the initial `admin` account and password (at least 8 characters). Alternatively, set `FREUD_ADMIN_PASSWORD` to provision the initial admin non-interactively on startup.
 
-The Web UI exposes six pages:
+The Web UI exposes seven pages:
 - **Dashboard (`/`)**: execution counts, success rate, upcoming cron runs, and recent executions (auto-refreshes via HTMX).
-- **Flows (`/flows`)**: workflows discovered in `flows/`, cron schedules, SVG task topology, read-only YAML source viewer, and a **Run Now** button to trigger the flow immediately and jump to its live execution page.
-- **Executions (`/executions`)**: newest-to-oldest execution history with status filter, search, who triggered each run, real-time streaming task logs, Gantt timeline, and execution topology.
+- **Flows (`/flows`)**: workflows discovered in `flows/`, Git sync status & **Sync Now**, cron schedules, SVG task topology, read-only YAML source viewer, and a **Run Now** button.
+- **Executions (`/executions`)**: paginated execution history with status filter, search, who triggered each run, real-time streaming task logs, Gantt timeline, and execution topology.
 - **Includes (`/includes`)**: read-only file browser for `includes/`.
 - **API (`/api`)**: built-in REST API v1 & MCP endpoint/parameter reference plus personal Bearer API token creation and revocation.
-- **Users & Audit (`/audit`)**: searchable activity audit log (`SETUP_ADMIN`, `LOGIN`, `LOGOUT`, `FLOW_RUN`, `FLOW_KILL`, `USER_CREATED`, `USER_DELETED`, `PASSWORD_CHANGED`, `TOKEN_CREATED`, `TOKEN_REVOKED`), password self-service, and admin user management (all users share the same flow permissions; admins can additionally add/remove users).
+- **Users & Audit (`/audit`)**: paginated activity audit log (`SETUP_ADMIN`, `LOGIN`, `LOGOUT`, `FLOW_RUN`, `FLOW_KILL`, `USER_CREATED`, `USER_DELETED`, `PASSWORD_CHANGED`, `TOKEN_CREATED`, `TOKEN_REVOKED`, `FLOW_SYNC`, `RETENTION_CLEANUP`, ...), password self-service, and admin user management.
+- **Maintenance (`/maintenance`)**: storage footprint overview (DB rows & SQLite size, `workspaces/` disk usage, Docker cache images), configurable age-based retention policies, **Run Cleanup Now**, and Docker cache clearing.
 
 Manage cached dependency images:
 
@@ -149,6 +152,17 @@ prune = true                       # remove local YAML/include files deleted in 
 ```
 
 Additional environment overrides for `[sync]`: `FREUD_SYNC_ENABLED`, `FREUD_SYNC_REPO`, `FREUD_SYNC_BRANCH`, `FREUD_SYNC_INTERVAL`, `FREUD_SYNC_CACHE_DIR`, `FREUD_SYNC_FLOWS_PATH` (comma-separated), `FREUD_SYNC_INCLUDES_PATH`, `FREUD_SYNC_PRUNE`, `FREUD_SYNC_TOKEN`, `FREUD_SYNC_SSH_KEY`, `FREUD_SYNC_WEBHOOK_SECRET`.
+
+Optional `[retention]` block in `freud.toml` (overridable via `FREUD_RETENTION_INTERVAL`, `FREUD_RETENTION_RUNS_DAYS`, `FREUD_RETENTION_WORKSPACES_DAYS`, `FREUD_RETENTION_AUDIT_DAYS`, `FREUD_RETENTION_VACUUM_SQLITE`, or live in Web UI **Maintenance (`/maintenance`)**; `0` disables deletion):
+
+```toml
+[retention]
+interval = "6h"
+runs_days = 0          # delete finished runs & task_runs older than N days
+workspaces_days = 0    # delete workspaces/<run_id> directories older than N days
+audit_days = 0         # delete audit_logs entries older than N days
+vacuum_sqlite = false
+```
 
 Relative paths inside `freud.toml` are resolved relative to the directory containing `freud.toml`.
 
@@ -290,6 +304,8 @@ curl -s -H "Authorization: Bearer $FREUD_TOKEN" http://localhost:4321/api/v1/flo
 | `GET` | `/api/v1/tokens` | Any user | List API tokens (admins see all tokens; members see their own) |
 | `POST` | `/api/v1/tokens` | Any user | Issue a new API token (`{"name":"github-ci"}`) — raw token returned once |
 | `DELETE` | `/api/v1/tokens/{id}` | Owner or Admin | Revoke an API token by ID |
+| `GET` | `/api/v1/maintenance` | Any user | Storage footprint (`runs`, `task_runs`, `workspaces`, Docker cache) and active retention policy |
+| `POST` | `/api/v1/maintenance/cleanup` | **Admin only** | Run age-based cleanup now and return reclaimed counts |
 
 ### Quick Examples
 
@@ -402,6 +418,7 @@ Notes:
   - **`sessions`**: `token`, `username`, `expires_at`, `created_at`
   - **`api_tokens`**: `id`, `username`, `name`, `prefix`, `token_hash`, `last_used_at`, `created_at`
   - **`audit_logs`**: `id`, `username`, `action`, `target`, `source`, `details`, `created_at`
+  - **`settings`**: `key_name`, `val`, `updated_at`
 
 Example launching Dream UI or running a flow against PostgreSQL or MariaDB:
 

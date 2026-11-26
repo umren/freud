@@ -85,8 +85,9 @@ type RunStats struct {
 
 // Store wraps database persistence for workflow runs and task runs across SQLite, PostgreSQL, and MySQL/MariaDB.
 type Store struct {
-	db      *sql.DB
-	dialect Dialect
+	db         *sql.DB
+	dialect    Dialect
+	sqlitePath string
 }
 
 // Open initializes the SQLite, PostgreSQL, or MySQL/MariaDB database, runs migrations, and returns a Store.
@@ -141,7 +142,11 @@ func Open(dsn string) (*Store, error) {
 		}
 	}
 
-	store := &Store{db: sqlDB, dialect: dialect}
+	sqlitePath := ""
+	if dialect == DialectSQLite && dsn != ":memory:" && !strings.HasPrefix(dsn, "file:") {
+		sqlitePath = dsn
+	}
+	store := &Store{db: sqlDB, dialect: dialect, sqlitePath: sqlitePath}
 	if err := store.migrate(); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
@@ -313,6 +318,11 @@ func (s *Store) migrate() error {
 	last_used_at TEXT,
 	created_at TEXT NOT NULL
 )`,
+		`CREATE TABLE IF NOT EXISTS settings (
+	key_name TEXT PRIMARY KEY,
+	val TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC)`,
@@ -413,6 +423,11 @@ func (s *Store) migrateMySQL() error {
 	last_used_at VARCHAR(64),
 	created_at VARCHAR(64) NOT NULL,
 	INDEX idx_api_tokens_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS settings (
+	key_name VARCHAR(128) PRIMARY KEY,
+	val LONGTEXT NOT NULL,
+	updated_at VARCHAR(64) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
 

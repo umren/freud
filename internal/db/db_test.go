@@ -444,4 +444,83 @@ func runStoreUsersAndAuditChecks(t *testing.T, store *Store) {
 	if err != nil || totalAuditSearch != 1 || len(searchedAudit) != 1 || searchedAudit[0].Action != "FLOW_RUN" {
 		t.Fatalf("unexpected searched audit logs: logs=%+v total=%d err=%v", searchedAudit, totalAuditSearch, err)
 	}
+
+	// Settings upsert, read, storage counts, and delete by prefix.
+	if err := store.UpsertSetting(ctx, "retention.runs_days", "30"); err != nil {
+		t.Fatalf("UpsertSetting create: %v", err)
+	}
+	if err := store.UpsertSetting(ctx, "retention.runs_days", "14"); err != nil {
+		t.Fatalf("UpsertSetting update: %v", err)
+	}
+	kv, err := store.GetSettingsByPrefix(ctx, "retention.")
+	if err != nil || kv["retention.runs_days"] != "14" {
+		t.Fatalf("GetSettingsByPrefix mismatch: %+v err=%v", kv, err)
+	}
+	sc, err := store.GetStorageCounts(ctx)
+	if err != nil || sc.AuditLogs < 2 {
+		t.Fatalf("GetStorageCounts mismatch: %+v err=%v", sc, err)
+	}
+	if err := store.DeleteSettingsByPrefix(ctx, "retention."); err != nil {
+		t.Fatalf("DeleteSettingsByPrefix: %v", err)
+	}
+	kvAfter, err := store.GetSettingsByPrefix(ctx, "retention.")
+	if err != nil || len(kvAfter) != 0 {
+		t.Fatalf("expected settings cleared after DeleteSettingsByPrefix, got %+v err=%v", kvAfter, err)
+	}
+}
+
+func TestStoreMaintenanceCleanup(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "cleanup.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.CreateRun(ctx, "run-old", "demo"); err != nil {
+		t.Fatal(err)
+	}
+	tr1, err := store.CreateTaskRun(ctx, "run-old", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.FinishTaskRun(ctx, tr1, StatusSuccess, 0, "done")
+	_ = store.FinishRun(ctx, "run-old", StatusSuccess)
+
+	if err := store.CreateRun(ctx, "run-keep", "demo"); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.RecordAudit(ctx, "admin", "LOGIN", "dream", "dream", "")
+	_ = store.CreateSession(ctx, "exp-tok", "admin", time.Now().UTC().Add(-time.Hour))
+	_ = store.CreateSession(ctx, "ok-tok", "admin", time.Now().UTC().Add(time.Hour))
+
+	// Backdate finished_at and audit created_at directly to test cutoff pruning.
+	oldTS := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339Nano)
+	_, _ = store.db.ExecContext(ctx, store.rebind(`UPDATE runs SET finished_at = ? WHERE id = ?`), oldTS, "run-old")
+	_, _ = store.db.ExecContext(ctx, store.rebind(`UPDATE audit_logs SET created_at = ?`), oldTS)
+
+	meta, err := store.ListRunRetentionMeta(ctx)
+	if err != nil || len(meta) != 2 {
+		t.Fatalf("ListRunRetentionMeta: %+v err=%v", meta, err)
+	}
+
+	delRuns, delTasks, err := store.DeleteRunsByIDs(ctx, []string{"run-old"})
+	if err != nil || delRuns != 1 || delTasks != 1 {
+		t.Fatalf("DeleteRunsByIDs: runs=%d tasks=%d err=%v", delRuns, delTasks, err)
+	}
+	if _, err := store.GetRun(ctx, "run-keep"); err != nil {
+		t.Fatalf("expected run-keep still present: %v", err)
+	}
+
+	delSess, err := store.DeleteExpiredSessions(ctx, time.Now().UTC())
+	if err != nil || delSess != 1 {
+		t.Fatalf("DeleteExpiredSessions: %d err=%v", delSess, err)
+	}
+	delAudit, err := store.PruneAuditLogsBefore(ctx, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil || delAudit != 1 {
+		t.Fatalf("PruneAuditLogsBefore: %d err=%v", delAudit, err)
+	}
+	if err := store.Vacuum(ctx); err != nil {
+		t.Fatalf("Vacuum: %v", err)
+	}
 }

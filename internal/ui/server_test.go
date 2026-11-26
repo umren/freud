@@ -16,9 +16,11 @@ import (
 	"strings"
 	"testing"
 
+	"freud/internal/auth"
 	"freud/internal/config"
 	"freud/internal/db"
 	"freud/internal/engine"
+	"freud/internal/maintenance"
 	"freud/internal/syncer"
 	"freud/internal/workflow"
 )
@@ -883,5 +885,137 @@ func TestUIAndWebhookGitSync(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(rec.Header().Get("Location"), "/flows?sync_msg=") {
 		t.Fatalf("expected redirect with sync_msg after POST /flows/sync, got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+func TestUIMaintenancePageAndAPI(t *testing.T) {
+	tmp := t.TempDir()
+	flowsDir := filepath.Join(tmp, "flows")
+	wsDir := filepath.Join(tmp, "workspaces")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := db.Open(filepath.Join(tmp, "maint_ui.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	adminHash, _ := auth.HashPassword("adminpass12")
+	memberHash, _ := auth.HashPassword("memberpass12")
+	_, _ = store.CreateUser(ctx, "admin", adminHash, true)
+	_, _ = store.CreateUser(ctx, "member", memberHash, false)
+
+	maintSvc, err := maintenance.New(store, wsDir, config.RetentionConfig{
+		Interval:       "6h",
+		RunsDays:       30,
+		WorkspacesDays: 7,
+		AuditDays:      90,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := NewServer(store, Config{
+		FlowsDir:    flowsDir,
+		EnableAuth:  true,
+		Maintenance: maintSvc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	loginAs := func(user, pass string) *http.Cookie {
+		form := url.Values{"username": {user}, "password": {pass}}
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == sessionCookieName {
+				return c
+			}
+		}
+		t.Fatalf("missing session cookie for %s", user)
+		return nil
+	}
+
+	adminCookie := loginAs("admin", "adminpass12")
+	memberCookie := loginAs("member", "memberpass12")
+
+	// Member can inspect storage stats on /maintenance and GET /api/v1/maintenance, but cannot mutate settings or run cleanup.
+	req := httptest.NewRequest(http.MethodGet, "/maintenance", nil)
+	req.AddCookie(memberCookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Retention Policy") {
+		t.Fatalf("expected 200 on /maintenance for member, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/maintenance/settings", strings.NewReader(url.Values{"runs_days": {"10"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(memberCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin saving retention policy, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/cleanup", nil)
+	req.AddCookie(memberCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin POST /api/v1/maintenance/cleanup, got %d", rec.Code)
+	}
+
+	// Admin updates retention policy, runs cleanup, inspects JSON API, and resets to config defaults.
+	saveForm := url.Values{
+		"runs_days":       {"15"},
+		"workspaces_days": {"3"},
+		"audit_days":      {"45"},
+		"vacuum_sqlite":   {"1"},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/maintenance/settings", strings.NewReader(saveForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(adminCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(rec.Header().Get("Location"), "/maintenance?msg=") {
+		t.Fatalf("expected redirect with flash after saving retention policy, got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/maintenance", nil)
+	req.AddCookie(adminCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"runs_days": 15`) || !strings.Contains(rec.Body.String(), `"using_ui_overrides": true`) {
+		t.Fatalf("unexpected GET /api/v1/maintenance: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/maintenance/cleanup", nil)
+	req.AddCookie(adminCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"trigger": "api"`) {
+		t.Fatalf("unexpected POST /api/v1/maintenance/cleanup: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/maintenance/reset", nil)
+	req.AddCookie(adminCookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 after reset, got %d", rec.Code)
+	}
+	pol, overridden, _ := maintSvc.ResolvePolicy(ctx)
+	if overridden || pol.RunsDays != 30 {
+		t.Fatalf("expected policy reverted to config default 30d, got pol=%+v overridden=%v", pol, overridden)
 	}
 }

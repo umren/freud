@@ -136,6 +136,8 @@ func buildAPIEndpointDocs() []apiEndpointDoc {
 		{Method: http.MethodGet, Path: "/api/v1/tokens", Access: "Any user", Params: "—", Description: "List API token metadata (admins see all; members see their own)."},
 		{Method: http.MethodPost, Path: "/api/v1/tokens", Access: "Any user", Params: `body JSON: {"name"}`, Description: "Generate a new frd_... API token (plaintext shown once)."},
 		{Method: http.MethodDelete, Path: "/api/v1/tokens/{id}", Access: "Owner or Admin", Params: "path: id (token ID)", Description: "Revoke an API token immediately."},
+		{Method: http.MethodGet, Path: "/api/v1/maintenance", Access: "Any user", Params: "—", Description: "Storage footprint metrics (DB rows/size, workspaces disk usage, Docker cache) and active retention policy."},
+		{Method: http.MethodPost, Path: "/api/v1/maintenance/cleanup", Access: "Admin only", Params: "—", Description: "Trigger age-based retention cleanup immediately and return deleted counts."},
 		{Method: http.MethodPost, Path: "/webhooks/sync", Access: "Webhook Secret", Params: "headers: X-Hub-Signature-256 / X-Gitea-Signature / X-Gitlab-Token / Bearer", Description: "Trigger Git sync on push webhooks from GitHub, GitLab, Gitea, etc."},
 		{Method: http.MethodPost, Path: "/mcp", Access: "Any user", Params: `body JSON-RPC 2.0: initialize, tools/list, tools/call, resources/list, resources/read`, Description: "Streamable HTTP MCP server endpoint for remote AI agents."},
 	}

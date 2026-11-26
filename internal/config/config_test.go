@@ -172,3 +172,42 @@ ssh_key = "./keys/id_ed25519"
 		t.Fatal("expected error for escaping sync.flows_path")
 	}
 }
+
+func TestRetentionConfigTOMLAndEnvOverrides(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "freud.toml")
+	tomlData := `
+[retention]
+interval = "12h"
+runs_days = 30
+workspaces_days = 7
+audit_days = 90
+vacuum_sqlite = true
+`
+	if err := os.WriteFile(cfgPath, []byte(tomlData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(Overrides{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("Load retention TOML: %v", err)
+	}
+	if cfg.Retention.Interval != "12h" || cfg.Retention.RunsDays != 30 || cfg.Retention.WorkspacesDays != 7 || cfg.Retention.AuditDays != 90 || !cfg.Retention.VacuumSQLite {
+		t.Fatalf("unexpected retention config: %+v", cfg.Retention)
+	}
+
+	t.Setenv("FREUD_RETENTION_RUNS_DAYS", "14")
+	t.Setenv("FREUD_RETENTION_VACUUM_SQLITE", "false")
+	cfg2, err := Load(Overrides{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("Load retention env overrides: %v", err)
+	}
+	if cfg2.Retention.RunsDays != 14 || cfg2.Retention.VacuumSQLite {
+		t.Fatalf("unexpected env retention overrides: %+v", cfg2.Retention)
+	}
+
+	t.Setenv("FREUD_RETENTION_RUNS_DAYS", "-5")
+	if _, err := Load(Overrides{ConfigPath: cfgPath}); err == nil {
+		t.Fatal("expected error for negative runs_days")
+	}
+}

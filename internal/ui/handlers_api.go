@@ -533,3 +533,34 @@ func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, res)
 }
+
+func (s *Server) handleAPIMaintenanceStatus(w http.ResponseWriter, r *http.Request) {
+	if s.maint == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "maintenance service is not configured")
+		return
+	}
+	rep, err := s.maint.InspectStorage(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+func (s *Server) handleAPIMaintenanceCleanup(w http.ResponseWriter, r *http.Request) {
+	cur := userFromRequest(r)
+	if s.cfg.EnableAuth && (cur == nil || !cur.IsAdmin) {
+		writeAPIError(w, http.StatusForbidden, "admin privileges required")
+		return
+	}
+	if s.maint == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "maintenance service is not configured")
+		return
+	}
+	res, err := s.maint.RunCleanup(r.Context(), "api", s.actorName(r), true)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
