@@ -1,10 +1,8 @@
-# Freud 🧠⚙️
+# Freud 🧠⚙️ (v1.0)
 
-A lightweight, **single-binary Go workflow orchestrator** that runs YAML DAG pipelines in Docker containers — with a built-in Web UI, Terminal UI, cron scheduler, Git sync, REST API, and MCP server for AI agents.
+A lightweight, **production-ready**, **single-binary Go workflow orchestrator** already used in real production projects. Runs parallel YAML DAG pipelines in isolated Docker containers — with a built-in Web UI, Terminal UI, cron scheduler, Git sync, REST API, and MCP server for AI agents.
 
-> 📖 **Full Technical Documentation:** [`DOCS.md`](DOCS.md)  
-> 🤖 **AI & Coding Agent Guide:** [`AGENTS.md`](AGENTS.md)  
-> 📜 **License:** [MIT](LICENSE)
+> 🚀 **Version 1.0 — Production-Ready** &nbsp;·&nbsp; 📖 **Full Technical Documentation:** [`DOCS.md`](DOCS.md) &nbsp;·&nbsp; 🤖 **AI Agents:** [`AGENTS.md`](AGENTS.md) &nbsp;·&nbsp; 📜 **License:** [MIT](LICENSE)
 
 ## 💡 Why Another Orchestrator?
 

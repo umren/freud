@@ -1,6 +1,6 @@
 # AGENTS.md — Freud Guide for AI & Coding Agents
 
-Freud is a single-binary Go container workflow orchestrator (`CGO_ENABLED=0`) with Dream Web UI, Bubbletea TUI, REST API v1, Git Sync, Retention/Maintenance, and an embedded MCP server.
+Freud (`v1.0`, production-ready) is a single-binary Go container workflow orchestrator (`CGO_ENABLED=0`) with Dream Web UI, Bubbletea TUI, REST API v1, Git Sync, Retention/Maintenance, and an embedded MCP server.
 
 ## Architecture & Packages
 

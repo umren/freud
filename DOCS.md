@@ -1,6 +1,6 @@
 # Freud Technical Reference (`DOCS.md`)
 
-Complete technical reference for **Freud (v0.1)** — configuration, CLI, YAML workflow specification, Dream Web UI, REST API v1, scoped Bearer tokens, `agent_madness`, MCP server, Git sync, retention/maintenance, and database backends.
+Complete technical reference for **Freud v1.0** — **production-ready** and already used in live projects. Covers configuration, CLI, YAML DAG specification, Dream Web UI, REST API v1, scoped Bearer tokens, `agent_madness`, MCP server, Git sync, retention/maintenance, and database backends.
 
 > Looking for the quick overview? See [`README.md`](README.md).  
 > Using an AI coding agent? See [`AGENTS.md`](AGENTS.md).

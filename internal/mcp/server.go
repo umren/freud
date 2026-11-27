@@ -363,7 +363,7 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 			},
 			"serverInfo": map[string]any{
 				"name":    "freud",
-				"version": "0.1.0",
+				"version": "1.0.0",
 			},
 			"instructions": "Freud container workflow orchestrator. Read freud://docs/workflow-spec for YAML schema, call get_context for .env keys and installation status, inspect flows (list_flows, get_flow) and includes (list_includes, get_include), validate drafts (validate_flow), run/kill pipelines (run_flow, get_execution with tail_lines, kill_execution), sync Git repos (sync_flows), and check audit logs (list_audit_logs).",
 		}, nil
