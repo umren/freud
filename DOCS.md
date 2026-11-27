@@ -238,7 +238,7 @@ tasks:
     timeout: "5m"             # optional per-attempt timeout (Go duration)
     retries: 2                # optional retry attempts after failure/timeout
     retry_delay: "10s"        # optional wait between retries
-    if: "${ENV_NAME} != 'off'"# optional condition (supports ==, !=, &&, ||, !, ())
+    if: "${ENV_NAME} != 'off'" # optional condition (supports ==, !=, &&, ||, !, ())
     dependencies:             # optional packages installed & cached via orchestrator-cache:*
       - pydantic
       - pyyaml
@@ -356,11 +356,11 @@ curl -s -H "Authorization: Bearer $FREUD_TOKEN" http://localhost:4321/api/v1/flo
 | `GET` | `/api/v1/me` | `read` | Current authenticated user (`username`, `is_admin`, `created_at`) |
 | `GET` | `/api/v1/context` | `read` | `.env` variable **names** only, counts, `agent_madness` / `writable_*` flags, sync status |
 | `GET` | `/api/v1/spec` | `read` | Canonical workflow YAML specification (`?format=raw` for Markdown) |
-| `GET` | `/api/v1/flows` | `read` | List discovered workflows in `flows/` with cron schedule and latest run |
+| `GET` | `/api/v1/flows` | `read` | List discovered workflows in `flows/` with cron schedule, `concurrency`, and latest run |
 | `POST` | `/api/v1/flows/validate` | `read` | Validate a workflow YAML draft (`{"yaml"}`) without saving to disk |
 | `GET` | `/api/v1/flows/sync` | `read` | Current Git sync status, branch, commit SHA, and last error |
 | `POST` | `/api/v1/flows/sync` | `run` | Trigger Git repository sync immediately |
-| `GET` | `/api/v1/flows/{file}` | `read` | Flow details, parsed task list, raw YAML, and recent runs |
+| `GET` | `/api/v1/flows/{file}` | `read` | Flow details (`concurrency`, task `when`/`if`/`timeout`/`retries`/`retry_delay`), raw YAML, and recent runs |
 | `PUT` | `/api/v1/flows/{file}` | **Admin + `write`** | Create/update flat `.yaml`/`.yml` flow (`{"yaml"}`, validated before atomic write; requires `agent_madness=true`, Git sync off) |
 | `DELETE` | `/api/v1/flows/{file}` | **Admin + `write`** | Delete flow YAML file (requires `agent_madness=true`, Git sync off) |
 | `POST` | `/api/v1/flows/{file}/run` | `run` | Start workflow asynchronously (`202 Accepted` with `run_id`; optional body `{"env": {"KEY":"VAL"}}`) |
@@ -506,7 +506,7 @@ Notes:
 - **MySQL / MariaDB** enforce `utf8mb4` (`LONGTEXT` for `logs` and `definition_json`) and `clientFoundRows=true`.
 - Managed tables:
   - **`runs`**: `id`, `workflow_name`, `status`, `created_at`, `finished_at`, `definition_json`, `parent_run_id`, `parent_task_id`, `triggered_by`
-  - **`task_runs`**: `id`, `run_id`, `task_id`, `status`, `exit_code`, `logs`, `started_at`, `finished_at`, `runtime`, `image`
+  - **`task_runs`**: `id`, `run_id`, `task_id`, `status` (`RUNNING`, `SUCCESS`, `FAILED`, `KILLED`, `SKIPPED`), `exit_code`, `logs`, `started_at`, `finished_at`, `runtime`, `image`
   - **`users`**: `id`, `username`, `password_hash`, `is_admin`, `created_at`
   - **`sessions`**: `token`, `username`, `expires_at`, `created_at`
   - **`api_tokens`**: `id`, `username`, `name`, `scope`, `prefix`, `token_hash`, `last_used_at`, `created_at`
