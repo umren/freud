@@ -207,12 +207,31 @@ func printConfigSummary(tag string, cfg config.Config, loadedEnv []string, envCo
 	}
 }
 
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceFlag) Set(val string) error {
+	*s = append(*s, val)
+	return nil
+}
+
 func runWorkflowCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var b cliFlagBindings
 	registerCommonFlags(fs, &b)
+	var envFlags stringSliceFlag
+	fs.Var(&envFlags, "env", "Override env variable for this run (KEY=VALUE, repeatable)")
+	fs.Var(&envFlags, "e", "Shorthand for --env")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	runEnv, err := env.ParseEnvAssignments(envFlags)
+	if err != nil {
 		return err
 	}
 
@@ -255,10 +274,17 @@ func runWorkflowCmd(args []string) error {
 
 	actor := auth.LocalActor()
 	runCtx := engine.WithTriggeredBy(ctx, actor)
+	if len(runEnv) > 0 {
+		runCtx = engine.WithRunEnv(runCtx, runEnv)
+	}
 	runID, err := rt.eng.Run(runCtx, wf)
 	rt.eng.Wait()
 	if runID != "" {
-		_ = rt.store.RecordAudit(context.Background(), actor, "FLOW_RUN", wf.Name, "cli", "run_id="+runID)
+		details := "run_id=" + runID
+		if envKeys := env.SortedKeys(runEnv); len(envKeys) > 0 {
+			details += ", env_keys=" + strings.Join(envKeys, ",")
+		}
+		_ = rt.store.RecordAudit(context.Background(), actor, "FLOW_RUN", wf.Name, "cli", details)
 	}
 	if err != nil {
 		if runID != "" {
@@ -598,7 +624,7 @@ func printUsage() {
 	c := term.StderrColor()
 	fmt.Fprint(os.Stderr, term.Banner(c))
 	fmt.Fprintln(os.Stderr, term.Bold(c, "Usage:"))
-	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--no-cache] <workflow.yaml>\n", term.Key(c, "freud run"))
+	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [-e KEY=VAL] [--no-cache] <workflow.yaml>\n", term.Key(c, "freud run"))
 	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--scheduler] [--no-cache]\n", term.Key(c, "freud tui"))
 	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--port 4321] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--scheduler] [--no-auth] [--no-cache]\n", term.Key(c, "freud dream"))
 	fmt.Fprintf(os.Stderr, "  %s [--config freud.toml] [--db path] [--flows-dir dir] [--includes-dir dir] [--workspaces-dir dir] [--env-file .env] [--token frd_...] [--no-cache]\n", term.Key(c, "freud mcp"))

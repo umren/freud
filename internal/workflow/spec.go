@@ -22,7 +22,7 @@ Workflows are YAML files stored in the configured flows directory (` + "`flows/`
 - ` + "`image`" + ` (string, optional for ` + "`python`" + `/` + "`js`" + `; **required** for ` + "`shell`" + `): Docker image tag (no whitespace).
 - ` + "`dependencies`" + ` (list of strings, optional for ` + "`python`" + `/` + "`js`" + `; **not supported** on ` + "`shell`" + `): Packages installed and cached into ` + "`orchestrator-cache:*`" + ` layers.
 - ` + "`include`" + ` (list of strings, optional): Per-task relative paths mounted read-only at ` + "`/includes`" + `.
-- ` + "`env`" + ` (map<string,string>, optional): Task environment overrides. Supports referencing ` + "`.env`" + ` variables via ` + "`${VAR}`" + ` syntax.
+- ` + "`env`" + ` (map<string,string>, optional): Task environment overrides. Supports referencing ` + "`.env`" + ` or per-run variables via ` + "`${VAR}`" + ` syntax.
 - ` + "`script`" + ` (string, **required** for container tasks): Script body written to ` + "`/workspace/.scripts/<task_id>.(py|ts|sh)`" + `.
 
 ### Subflow Tasks (mutually exclusive with container fields except ` + "`id`" + `, ` + "`depends_on`" + `, ` + "`env`" + `)
@@ -34,6 +34,7 @@ Workflows are YAML files stored in the configured flows directory (` + "`flows/`
 - Working directory: ` + "`/workspace`" + ` (shared across tasks within the same run ID).
 - Includes mount: ` + "`/includes`" + ` (read-only). ` + "`PYTHONPATH`" + ` includes ` + "`/includes`" + ` for Python tasks.
 - Base environment: All keys from loaded ` + "`.env`" + ` file(s) are injected into task containers (values are never logged).
+- Per-run overrides: Callers may pass temporary ` + "`env`" + ` parameters per execution (CLI ` + "`-e/--env`" + `, Dream UI, REST API ` + "`{\"env\": ...}`" + `, MCP ` + "`run_flow`" + `). Precedence: ` + "`.env`" + ` < task ` + "`env:`" + ` < per-run ` + "`env`" + ` (and ` + "`${VAR}`" + ` inside task ` + "`env:`" + ` resolves against merged ` + "`.env`" + ` + per-run ` + "`env`" + `).
 
 ## Example
 

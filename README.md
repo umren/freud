@@ -70,10 +70,10 @@ Run a workflow YAML file:
 ./freud run flows/etl-example.yaml
 ```
 
-Optionally pass a custom `.env` file or force-rebuild cached dependency images:
+Optionally pass a custom `.env` file, per-run `-e KEY=VAL` overrides, or force-rebuild cached dependency images:
 
 ```bash
-./freud run --env-file .env.prod flows/etl-example.yaml
+./freud run --env-file .env.prod -e TARGET_DATE=2026-11-20 flows/etl-example.yaml
 ./freud run --no-cache flows/etl-example.yaml
 ```
 
@@ -99,7 +99,7 @@ On the very first launch of `./freud dream` (when no admin user exists yet), ope
 
 The Web UI exposes seven pages:
 - **Dashboard (`/`)**: execution counts, success rate, upcoming cron runs, and recent executions (auto-refreshes via HTMX).
-- **Flows (`/flows`)**: workflows discovered in `flows/`, Git sync status & **Sync Now**, cron schedules, SVG task topology, read-only YAML source viewer, and a **Run Now** button.
+- **Flows (`/flows`)**: workflows discovered in `flows/`, Git sync status & **Sync Now**, cron schedules, SVG task topology, read-only YAML source viewer, quick **Run**, and **Run with Env** parameter overrides.
 - **Executions (`/executions`)**: paginated execution history with status filter, search, who triggered each run, real-time streaming task logs, Gantt timeline, and execution topology.
 - **Includes (`/includes`)**: read-only file browser for `includes/`.
 - **API (`/api`)**: built-in REST API v1 & MCP endpoint/parameter reference plus personal Bearer API token creation and revocation.
@@ -171,8 +171,9 @@ Relative paths inside `freud.toml` are resolved relative to the directory contai
 
 - When `--env-file` is omitted, the orchestrator automatically loads `.env` from the workflow's directory and/or the current working directory (current working directory takes precedence if both exist).
 - All variables from `.env` are injected into every task container (`os.environ` in Python, `process.env` in JS/Bun, `$VAR` in shell).
-- Task-level `env:` entries in YAML override `.env` variables on key collision and can reference `.env` variables via `${VAR}` syntax (for example `AUTH_TOKEN: "${API_KEY}"`).
-- Host environment variables are not forwarded automatically, and `.env` values are never printed to orchestrator logs.
+- Task-level `env:` entries in YAML override `.env` variables on key collision and can reference `.env` or per-run variables via `${VAR}` syntax (for example `AUTH_TOKEN: "${API_KEY}"`).
+- Manual/API/MCP/CLI runs can supply temporary per-run `env` overrides (CLI `-e KEY=VAL`, Dream UI `/flows` & `/flows/{file}`, REST `POST /api/v1/flows/{file}/run` with `{"env": ...}`, or MCP `run_flow`). Precedence is `.env` < task `env:` < per-run `env`, and per-run values are never written to audit logs (only `env_keys`).
+- Host environment variables are not forwarded automatically, and `.env` / per-run values are never printed to orchestrator logs.
 
 You can interrupt a running workflow with `Ctrl+C` (`SIGINT`/`SIGTERM`), which cancels execution and records the active task and run as `FAILED`.
 
@@ -302,7 +303,7 @@ curl -s -H "Authorization: Bearer $FREUD_TOKEN" http://localhost:4321/api/v1/flo
 | `GET` | `/api/v1/flows/{file}` | `read` | Flow details, parsed task list, raw YAML, and recent runs |
 | `PUT` | `/api/v1/flows/{file}` | **Admin + `write`** | Create/update workflow YAML (validated; requires `agent_madness = true` & Git sync disabled) |
 | `DELETE` | `/api/v1/flows/{file}` | **Admin + `write`** | Delete workflow YAML file (requires `agent_madness = true` & Git sync disabled) |
-| `POST` | `/api/v1/flows/{file}/run` | `run` | Start workflow execution asynchronously (`202 Accepted` with `run_id`) |
+| `POST` | `/api/v1/flows/{file}/run` | `run` | Start workflow execution asynchronously (`202 Accepted` with `run_id`; optional `{"env": {"KEY":"VAL"}}`) |
 | `GET` | `/api/v1/includes` | `read` | List shared files under `includes/` |
 | `GET` | `/api/v1/includes/{path}` | `read` | Read a shared file under `includes/` safely |
 | `PUT` | `/api/v1/includes/{path}` | **Admin + `write`** | Create/update shared file in `includes/` (max 512 KiB; requires `agent_madness = true` & Git sync disabled) |
@@ -366,7 +367,7 @@ Freud embeds a zero-dependency **MCP JSON-RPC 2.0 server** inside the same binar
   - `save_flow` (`{file, yaml}`) / `delete_flow` (`{file}`) — create/update (validated) or delete workflow files (`agent_madness = true`, admin + `write` scope, Git sync disabled)
   - `list_includes` / `get_include` (`{path}`) — inspect shared scripts in `includes/`
   - `save_include` (`{path, content}`) / `delete_include` (`{path}`) — create/update or delete shared files in `includes/` (`agent_madness = true`, admin + `write` scope, Git sync disabled)
-  - `run_flow` (`{file, wait?, timeout_seconds?, tail_lines?}`) — trigger a workflow asynchronously or wait (up to 300s) for completion & task logs (`run` scope)
+  - `run_flow` (`{file, env?, wait?, timeout_seconds?, tail_lines?}`) — trigger a workflow (with optional per-run `env` overrides) asynchronously or wait (up to 300s) for completion & task logs (`run` scope)
   - `list_executions` (`{status?, q?, limit?, offset?}`) — query paginated execution history and status stats
   - `get_execution` (`{run_id, tail_lines?}`) — inspect execution status, `triggered_by`, child subflows, and task logs
   - `kill_execution` (`{run_id}`) — terminate an active `RUNNING` execution (`run` scope)

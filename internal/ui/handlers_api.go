@@ -12,6 +12,7 @@ import (
 
 	"freud/internal/auth"
 	"freud/internal/db"
+	"freud/internal/env"
 	"freud/internal/mcp"
 	"freud/internal/service"
 	"freud/internal/syncer"
@@ -264,20 +265,37 @@ func (s *Server) handleAPIRunFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var req struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON body: %v", err))
+		return
+	}
+	cleanEnv, err := env.ValidateEnvMap(req.Env)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	actor := s.actorName(r)
 	source, tokenNote := s.auditSource(r, "api")
-	runID, code, err := s.launchFlowAsync(r.Context(), actor, source, tokenNote, matched.Workflow)
+	runID, code, err := s.launchFlowAsync(r.Context(), actor, source, tokenNote, matched.Workflow, cleanEnv)
 	if err != nil {
 		writeAPIError(w, code, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	resp := map[string]any{
 		"run_id":        runID,
 		"workflow_name": matched.Workflow.Name,
 		"status":        db.StatusRunning,
 		"triggered_by":  actor,
-	})
+	}
+	if envKeys := env.SortedKeys(cleanEnv); len(envKeys) > 0 {
+		resp["env_keys"] = envKeys
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (s *Server) handleAPIExecutions(w http.ResponseWriter, r *http.Request) {

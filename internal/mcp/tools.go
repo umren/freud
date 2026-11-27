@@ -11,6 +11,7 @@ import (
 	"freud/internal/auth"
 	"freud/internal/db"
 	"freud/internal/engine"
+	"freud/internal/env"
 	"freud/internal/service"
 	"freud/internal/syncer"
 	"freud/internal/workflow"
@@ -71,6 +72,11 @@ func (s *Server) registerTools() {
 				"tail_lines": map[string]any{
 					"type":        "integer",
 					"description": "Optional limit to return only the last N log lines per task when wait=true.",
+				},
+				"env": map[string]any{
+					"type":                 "object",
+					"description":          "Optional per-run environment variable overrides (string key-value pairs; overrides .env and task env defaults for this run only).",
+					"additionalProperties": map[string]any{"type": "string"},
 				},
 			},
 			"required": []string{"file"},
@@ -327,12 +333,17 @@ func (s *Server) toolRunFlow(ctx context.Context, raw json.RawMessage) (any, err
 		return nil, fmt.Errorf("execution runner is not configured")
 	}
 	var args struct {
-		File           string `json:"file"`
-		Wait           bool   `json:"wait"`
-		TimeoutSeconds int    `json:"timeout_seconds"`
-		TailLines      int    `json:"tail_lines"`
+		File           string            `json:"file"`
+		Wait           bool              `json:"wait"`
+		TimeoutSeconds int               `json:"timeout_seconds"`
+		TailLines      int               `json:"tail_lines"`
+		Env            map[string]string `json:"env"`
 	}
 	if err := decodeArgs(raw, &args); err != nil {
+		return nil, err
+	}
+	cleanEnv, err := env.ValidateEnvMap(args.Env)
+	if err != nil {
 		return nil, err
 	}
 	matched, err := service.FindFlow(s.cfg.FlowsDir, args.File, true)
@@ -341,12 +352,19 @@ func (s *Server) toolRunFlow(ctx context.Context, raw json.RawMessage) (any, err
 	}
 
 	runCtx := engine.WithTriggeredBy(s.runCtx, actor.Username)
+	if len(cleanEnv) > 0 {
+		runCtx = engine.WithRunEnv(runCtx, cleanEnv)
+	}
 	runID, doneCh, err := s.cfg.Runner.StartAsync(runCtx, matched.Workflow)
 	if err != nil {
 		return nil, fmt.Errorf("start workflow %q: %w", matched.Workflow.Name, err)
 	}
 
 	details := "run_id=" + runID
+	envKeys := env.SortedKeys(cleanEnv)
+	if len(envKeys) > 0 {
+		details += ", env_keys=" + strings.Join(envKeys, ",")
+	}
 	if actor.Details != "" {
 		details += ", " + actor.Details
 	}
@@ -365,12 +383,16 @@ func (s *Server) toolRunFlow(ctx context.Context, raw json.RawMessage) (any, err
 	}()
 
 	if !args.Wait {
-		return map[string]any{
+		resp := map[string]any{
 			"run_id":        runID,
 			"workflow_name": matched.Workflow.Name,
 			"status":        db.StatusRunning,
 			"triggered_by":  actor.Username,
-		}, nil
+		}
+		if len(envKeys) > 0 {
+			resp["env_keys"] = envKeys
+		}
+		return resp, nil
 	}
 
 	timeoutSec := service.ClampLimit(args.TimeoutSeconds, defaultWaitSeconds, maxWaitSeconds)

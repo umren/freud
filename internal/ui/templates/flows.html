@@ -12,6 +12,9 @@
 {{if .SyncErr}}
 <div class="alert-error">{{.SyncErr}}</div>
 {{end}}
+{{if .FlashErr}}
+<div class="alert-error">{{.FlashErr}}</div>
+{{end}}
 
 {{if .Sync.Enabled}}
 <section class="card" style="margin-bottom:18px">
@@ -43,66 +46,102 @@
 </section>
 {{end}}
 
-<section class="card" x-data="{ q: '' }">
-  <div class="card-head">
-    <h2 class="card-title">Registered Flows ({{len .Flows}})</h2>
-    <input class="input" type="search" placeholder="Filter flows..." x-model="q">
-  </div>
+<div x-data="{ q: '', paramFlow: '', rows: [{k: '', v: ''}] }">
+  <section class="card" x-show="paramFlow !== ''" x-cloak style="margin-bottom:18px">
+    <div class="card-head">
+      <h2 class="card-title">Run <span class="mono" x-text="paramFlow"></span> with Parameters</h2>
+      <button type="button" class="btn" @click="paramFlow = ''">Close</button>
+    </div>
+    <form method="POST" :action="'/flows/' + encodeURIComponent(paramFlow) + '/run'" class="card-body">
+      <input type="hidden" name="return_to" value="flows">
+      <template x-for="(row, idx) in rows" :key="idx">
+        <div class="toolbar" style="margin-bottom:8px">
+          <input class="input mono" type="text" name="env_key" x-model="row.k" placeholder="VARIABLE_NAME" style="min-width:200px">
+          <input class="input mono" type="text" name="env_val" x-model="row.v" placeholder="value" style="flex:1;min-width:240px">
+          <button type="button" class="btn" @click="rows.length > 1 ? rows.splice(idx, 1) : (row.k = '', row.v = '')" title="Remove row">×</button>
+        </div>
+      </template>
+      <div class="toolbar" style="justify-content:space-between;margin-top:10px">
+        <button type="button" class="btn" @click="rows.push({k: '', v: ''})">+ Add Variable</button>
+        <button type="submit" class="btn btn-primary">▶ Run with Parameters</button>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:8px">Per-run overrides apply to this execution only (precedence: <span class="mono">.env</span> &lt; task <span class="mono">env</span> &lt; per-run). Values are never written to audit logs.</div>
+    </form>
+  </section>
 
-  {{if .Flows}}
-  <table>
-    <thead>
-      <tr>
-        <th>Flow Name</th>
-        <th>File</th>
-        <th>Tasks</th>
-        <th>Cron Schedule</th>
-        <th>Next Run</th>
-        <th>Last Execution</th>
-      </tr>
-    </thead>
-    <tbody>
-      {{range .Flows}}
-      <tr x-show="q === '' || '{{.SearchKey}}'.includes(q.toLowerCase())">
-        <td>
-          {{if .ParseErr}}
-            <span class="badge badge-failed">INVALID</span>
-            <span class="mono muted">{{.FileName}}</span>
-            <div class="muted" style="font-size:12px;margin-top:4px">{{.ParseErr}}</div>
-          {{else}}
-            <a href="/flows/{{.FileName}}"><strong>{{.Name}}</strong></a>
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Registered Flows ({{len .Flows}})</h2>
+      <input class="input" type="search" placeholder="Filter flows..." x-model="q">
+    </div>
+
+    {{if .Flows}}
+    <table>
+      <thead>
+        <tr>
+          <th>Flow Name</th>
+          <th>File</th>
+          <th>Tasks</th>
+          <th>Cron Schedule</th>
+          <th>Next Run</th>
+          <th>Last Execution</th>
+          {{if .CanRun}}<th></th>{{end}}
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Flows}}
+        <tr x-show="q === '' || '{{.SearchKey}}'.includes(q.toLowerCase())">
+          <td>
+            {{if .ParseErr}}
+              <span class="badge badge-failed">INVALID</span>
+              <span class="mono muted">{{.FileName}}</span>
+              <div class="muted" style="font-size:12px;margin-top:4px">{{.ParseErr}}</div>
+            {{else}}
+              <a href="/flows/{{.FileName}}"><strong>{{.Name}}</strong></a>
+            {{end}}
+          </td>
+          <td class="mono muted">{{.FileName}}</td>
+          <td class="mono">{{.TaskCount}}</td>
+          <td>
+            {{if .Cron}}
+              <span class="badge badge-accent mono">{{.Cron}}</span>
+            {{else}}
+              <span class="muted">manual</span>
+            {{end}}
+          </td>
+          <td class="mono muted">
+            {{if .NextRun}}
+              {{.NextRun}} <span style="font-size:11px">({{.StartsIn}})</span>
+            {{else}}
+              —
+            {{end}}
+          </td>
+          <td>
+            {{if .HasLastRun}}
+              <a href="/executions/{{.LastRunID}}" class="badge badge-{{.LastRunSlug}}"><span class="dot"></span>{{.LastRunStatus}}</a>
+              <span class="mono muted" style="font-size:11px;margin-left:6px">{{.LastRunAt}}</span>
+            {{else}}
+              <span class="muted">never run</span>
+            {{end}}
+          </td>
+          {{if $.CanRun}}
+          <td style="text-align:right;white-space:nowrap">
+            {{if not .ParseErr}}
+            <form method="POST" action="/flows/{{.FileName}}/run" style="display:inline">
+              <input type="hidden" name="return_to" value="flows">
+              <button type="submit" class="btn btn-primary" style="padding:3px 9px;font-size:11px">▶ Run</button>
+            </form>
+            <button type="button" class="btn" style="padding:3px 8px;font-size:11px" @click="paramFlow = '{{.FileName}}'; rows = [{k: '', v: ''}]" title="Run with parameters">⚙</button>
+            {{end}}
+          </td>
           {{end}}
-        </td>
-        <td class="mono muted">{{.FileName}}</td>
-        <td class="mono">{{.TaskCount}}</td>
-        <td>
-          {{if .Cron}}
-            <span class="badge badge-accent mono">{{.Cron}}</span>
-          {{else}}
-            <span class="muted">manual</span>
-          {{end}}
-        </td>
-        <td class="mono muted">
-          {{if .NextRun}}
-            {{.NextRun}} <span style="font-size:11px">({{.StartsIn}})</span>
-          {{else}}
-            —
-          {{end}}
-        </td>
-        <td>
-          {{if .HasLastRun}}
-            <a href="/executions/{{.LastRunID}}" class="badge badge-{{.LastRunSlug}}"><span class="dot"></span>{{.LastRunStatus}}</a>
-            <span class="mono muted" style="font-size:11px;margin-left:6px">{{.LastRunAt}}</span>
-          {{else}}
-            <span class="muted">never run</span>
-          {{end}}
-        </td>
-      </tr>
-      {{end}}
-    </tbody>
-  </table>
-  {{else}}
-  <div class="empty">No <span class="mono">.yaml</span> / <span class="mono">.yml</span> files found in <span class="mono">{{.FlowsDir}}/</span>.</div>
-  {{end}}
-</section>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">No <span class="mono">.yaml</span> / <span class="mono">.yml</span> files found in <span class="mono">{{.FlowsDir}}/</span>.</div>
+    {{end}}
+  </section>
+</div>
 {{end}}

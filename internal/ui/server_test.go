@@ -161,11 +161,18 @@ func TestBuildDAGLayout(t *testing.T) {
 }
 
 type mockAsyncRunner struct {
-	store *db.Store
+	store       *db.Store
+	seq         int
+	capturedEnv map[string]string
 }
 
 func (m *mockAsyncRunner) StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error) {
+	m.seq++
+	m.capturedEnv = engine.RunEnvFromContext(ctx)
 	runID := "ui-run-001"
+	if m.seq > 1 {
+		runID = fmt.Sprintf("ui-run-%03d", m.seq)
+	}
 	if err := m.store.CreateRunWithDefinition(ctx, runID, wf.Name, ""); err != nil {
 		return "", nil, err
 	}
@@ -1327,5 +1334,70 @@ func TestAgentMadnessAndTokenScopesAPI(t *testing.T) {
 		if err != nil || len(logs) == 0 {
 			t.Fatalf("expected audit log entry for %s, err=%v len=%d", action, err, len(logs))
 		}
+	}
+
+	// Per-run env via REST API and Dream UI /flows & /flows/{file}.
+	// 1) Invalid key rejected with 400 in API.
+	if rec := doReq(h, http.MethodPost, "/api/v1/flows/base.yaml/run", aliceRun, `{"env":{"1BAD":"x"}}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid per-run env key, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// 2) Valid per-run env passed via REST API: runner receives values, audit records only env_keys.
+	rec = doReq(h, http.MethodPost, "/api/v1/flows/base.yaml/run", aliceRun, `{"env":{"TARGET_DATE":"2026-11-20","API_TOK":"supersecret"}}`)
+	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), `"API_TOK"`) || !strings.Contains(rec.Body.String(), `"TARGET_DATE"`) || strings.Contains(rec.Body.String(), "supersecret") {
+		t.Fatalf("unexpected 202 response for per-run env API: %d %s", rec.Code, rec.Body.String())
+	}
+	if runner.capturedEnv["TARGET_DATE"] != "2026-11-20" || runner.capturedEnv["API_TOK"] != "supersecret" {
+		t.Fatalf("runner did not receive API per-run env: %+v", runner.capturedEnv)
+	}
+	// 3) Dream UI /flows and /flows/base.yaml render manual parameter controls & accept form env_key/env_val.
+	formBody := url.Values{
+		"username": {"alice"},
+		"password": {"secret123"},
+	}
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(formBody.Encode()))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginRec := httptest.NewRecorder()
+	h.ServeHTTP(loginRec, loginReq)
+	var aliceCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			aliceCookie = c
+			break
+		}
+	}
+	for _, p := range []string{"/flows", "/flows/base.yaml"} {
+		pageReq := httptest.NewRequest(http.MethodGet, p, nil)
+		pageReq.AddCookie(aliceCookie)
+		pageRec := httptest.NewRecorder()
+		h.ServeHTTP(pageRec, pageReq)
+		if pageRec.Code != http.StatusOK || !strings.Contains(pageRec.Body.String(), `name="env_key"`) {
+			t.Fatalf("expected per-run env form on %s, got %d", p, pageRec.Code)
+		}
+	}
+	badForm := url.Values{"env_key": {"BAD-KEY"}, "env_val": {"x"}, "return_to": {"flows"}}
+	uiBadReq := httptest.NewRequest(http.MethodPost, "/flows/base.yaml/run", strings.NewReader(badForm.Encode()))
+	uiBadReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	uiBadReq.AddCookie(aliceCookie)
+	uiBadRec := httptest.NewRecorder()
+	h.ServeHTTP(uiBadRec, uiBadReq)
+	if uiBadRec.Code != http.StatusSeeOther || !strings.Contains(uiBadRec.Header().Get("Location"), "/flows?err=") {
+		t.Fatalf("expected redirect with err for invalid form env_key, got %d loc=%s", uiBadRec.Code, uiBadRec.Header().Get("Location"))
+	}
+
+	goodForm := url.Values{"env_key": {"RUN_DATE", "TOKEN"}, "env_val": {"2026-11-21", "ui-secret-val"}}
+	uiRunReq := httptest.NewRequest(http.MethodPost, "/flows/base.yaml/run", strings.NewReader(goodForm.Encode()))
+	uiRunReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	uiRunReq.AddCookie(aliceCookie)
+	uiRunRec := httptest.NewRecorder()
+	h.ServeHTTP(uiRunRec, uiRunReq)
+	if uiRunRec.Code != http.StatusSeeOther || !strings.HasPrefix(uiRunRec.Header().Get("Location"), "/executions/") {
+		t.Fatalf("expected 303 redirect to execution on UI manual run with env, got %d loc=%s", uiRunRec.Code, uiRunRec.Header().Get("Location"))
+	}
+	if runner.capturedEnv["RUN_DATE"] != "2026-11-21" || runner.capturedEnv["TOKEN"] != "ui-secret-val" {
+		t.Fatalf("runner did not receive UI per-run env: %+v", runner.capturedEnv)
+	}
+	runLogs, _, err := store.ListAuditLogsPage(context.Background(), db.AuditQuery{Action: "FLOW_RUN", Limit: 5})
+	if err != nil || len(runLogs) == 0 || !strings.Contains(runLogs[0].Details.String, "env_keys=RUN_DATE,TOKEN") || strings.Contains(runLogs[0].Details.String, "ui-secret-val") {
+		t.Fatalf("unexpected FLOW_RUN audit details after UI env run: %+v err=%v", runLogs, err)
 	}
 }

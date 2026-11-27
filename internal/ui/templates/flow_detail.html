@@ -1,4 +1,5 @@
 {{define "content"}}
+<div x-data="{ showParams: false, rows: [{k: '', v: ''}] }">
 <div class="page-head">
   <div>
     <div class="muted" style="font-size:12px;margin-bottom:4px"><a href="/flows">← Back to Flows</a></div>
@@ -17,8 +18,37 @@
     <form method="POST" action="/flows/{{.Flow.FileName}}/run" style="margin:0">
       <button type="submit" class="btn btn-primary">▶ Run Now</button>
     </form>
+    <button type="button" class="btn" @click="showParams = !showParams">⚙ Run with Env</button>
     {{end}}
   </div>
+</div>
+
+{{if .FlashErr}}
+<div class="alert-error">{{.FlashErr}}</div>
+{{end}}
+
+{{if .CanRun}}
+<section class="card" x-show="showParams" x-cloak style="margin-bottom:18px">
+  <div class="card-head">
+    <h2 class="card-title">Manual Run Parameters</h2>
+    <button type="button" class="btn" @click="showParams = false">Close</button>
+  </div>
+  <form method="POST" action="/flows/{{.Flow.FileName}}/run" class="card-body">
+    <template x-for="(row, idx) in rows" :key="idx">
+      <div class="toolbar" style="margin-bottom:8px">
+        <input class="input mono" type="text" name="env_key" x-model="row.k" placeholder="VARIABLE_NAME" style="min-width:200px">
+        <input class="input mono" type="text" name="env_val" x-model="row.v" placeholder="value" style="flex:1;min-width:240px">
+        <button type="button" class="btn" @click="rows.length > 1 ? rows.splice(idx, 1) : (row.k = '', row.v = '')" title="Remove row">×</button>
+      </div>
+    </template>
+    <div class="toolbar" style="justify-content:space-between;margin-top:10px">
+      <button type="button" class="btn" @click="rows.push({k: '', v: ''})">+ Add Variable</button>
+      <button type="submit" class="btn btn-primary">▶ Run with Parameters</button>
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:8px">Per-run overrides apply to this execution only (precedence: <span class="mono">.env</span> &lt; task <span class="mono">env</span> &lt; per-run). Values are never written to audit logs.</div>
+  </form>
+</section>
+{{end}}
 </div>
 
 <div x-data="{ tab: 'yaml', copied: false }">

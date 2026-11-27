@@ -546,3 +546,77 @@ func TestEngineSubflowWaitFalseFailedChildAndDepthLimit(t *testing.T) {
 		t.Fatalf("expected subflow depth limit error, got %v", err)
 	}
 }
+
+func TestEnginePerRunEnvAndSubflowPropagation(t *testing.T) {
+	tmpDir := t.TempDir()
+	flowsDir := filepath.Join(tmpDir, "flows")
+	if err := os.MkdirAll(flowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	childYAML := `name: child-env
+tasks:
+  - id: child_step
+    runtime: python
+    env:
+      CHILD_EXP: "d=${TARGET_DATE}"
+      TARGET_DATE: "child-default"
+    script: print(1)
+`
+	if err := os.WriteFile(filepath.Join(flowsDir, "child.yaml"), []byte(childYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := db.Open(filepath.Join(tmpDir, "runenv.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	mr := &mockRunner{}
+	eng := New(store, mr, filepath.Join(tmpDir, "workspaces"))
+	eng.SetFlowsDir(flowsDir)
+	eng.SetEnv(map[string]string{
+		"BASE_KEY":    "from-dotenv",
+		"TARGET_DATE": "dotenv-date",
+	})
+
+	parentWF := &workflow.Workflow{
+		Name: "parent-env",
+		Tasks: []workflow.Task{
+			{
+				ID:      "p_step",
+				Runtime: workflow.RuntimePython,
+				Env: map[string]string{
+					"TARGET_DATE": "yaml-default",
+					"DERIVED":     "prefix-${TARGET_DATE}",
+				},
+				Script: "print(1)",
+			},
+			{
+				ID:        "sub_step",
+				Runtime:   workflow.RuntimeSubflow,
+				Flow:      "child-env",
+				DependsOn: []string{"p_step"},
+			},
+		},
+	}
+
+	ctx := WithRunEnv(WithTriggeredBy(context.Background(), "tester"), map[string]string{
+		"TARGET_DATE": "2026-11-20",
+		"EXTRA":       "one-off",
+	})
+	if _, err := eng.Run(ctx, parentWF); err != nil {
+		t.Fatalf("parentWF run failed: %v", err)
+	}
+
+	pEnv := mr.capturedEnvs["p_step"]
+	if pEnv["BASE_KEY"] != "from-dotenv" || pEnv["TARGET_DATE"] != "2026-11-20" || pEnv["DERIVED"] != "prefix-2026-11-20" || pEnv["EXTRA"] != "one-off" {
+		t.Fatalf("unexpected parent task env: %+v", pEnv)
+	}
+
+	cEnv := mr.capturedEnvs["child_step"]
+	if cEnv["TARGET_DATE"] != "2026-11-20" || cEnv["CHILD_EXP"] != "d=2026-11-20" || cEnv["EXTRA"] != "one-off" {
+		t.Fatalf("unexpected child subflow task env: %+v", cEnv)
+	}
+}

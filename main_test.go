@@ -161,3 +161,12 @@ func TestRunMCPWithIOAndTokenAuth(t *testing.T) {
 		t.Fatalf("expected mcp-bot token last_used_at recorded, got %+v err=%v", toks, err)
 	}
 }
+
+func TestRunWorkflowCmdEnvFlagsValidation(t *testing.T) {
+	if err := runWorkflowCmd([]string{"-e", "MISSING_EQ", "wf.yaml"}); err == nil || !strings.Contains(err.Error(), "expected KEY=VALUE") {
+		t.Fatalf("expected invalid assignment error, got %v", err)
+	}
+	if err := runWorkflowCmd([]string{"--env", "1BAD=value", "wf.yaml"}); err == nil || !strings.Contains(err.Error(), "invalid env variable name") {
+		t.Fatalf("expected invalid key error, got %v", err)
+	}
+}

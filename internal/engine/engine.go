@@ -69,7 +69,10 @@ type activeRun struct {
 
 type ctxKey string
 
-const triggeredByCtxKey ctxKey = "freud_triggered_by"
+const (
+	triggeredByCtxKey ctxKey = "freud_triggered_by"
+	runEnvCtxKey      ctxKey = "freud_run_env"
+)
 
 // WithTriggeredBy attaches the initiating user/source name (e.g. "admin", "cron", "tui") to ctx.
 func WithTriggeredBy(ctx context.Context, actor string) context.Context {
@@ -90,8 +93,37 @@ func TriggeredByFromContext(ctx context.Context) string {
 	return ""
 }
 
+// WithRunEnv attaches per-run environment variable overrides to ctx.
+func WithRunEnv(ctx context.Context, runEnv map[string]string) context.Context {
+	if len(runEnv) == 0 {
+		return ctx
+	}
+	cloned := make(map[string]string, len(runEnv))
+	for k, v := range runEnv {
+		cloned[k] = v
+	}
+	return context.WithValue(ctx, runEnvCtxKey, cloned)
+}
+
+// RunEnvFromContext extracts a defensive copy of per-run environment overrides from ctx, if any.
+func RunEnvFromContext(ctx context.Context) map[string]string {
+	if ctx == nil {
+		return nil
+	}
+	raw, ok := ctx.Value(runEnvCtxKey).(map[string]string)
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(raw))
+	for k, v := range raw {
+		cloned[k] = v
+	}
+	return cloned
+}
+
 type runOptions struct {
 	baseEnv      map[string]string
+	runEnv       map[string]string
 	parentRunID  string
 	parentTaskID string
 	triggeredBy  string
@@ -239,6 +271,7 @@ func (e *Engine) isKilled(runID string) bool {
 func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error) {
 	opts := runOptions{
 		baseEnv:     e.baseEnv,
+		runEnv:      RunEnvFromContext(ctx),
 		triggeredBy: TriggeredByFromContext(ctx),
 		flowStack:   []string{wf.Name},
 	}
@@ -264,6 +297,7 @@ func (e *Engine) Run(ctx context.Context, wf *workflow.Workflow) (string, error)
 func (e *Engine) StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error) {
 	opts := runOptions{
 		baseEnv:     e.baseEnv,
+		runEnv:      RunEnvFromContext(ctx),
 		triggeredBy: TriggeredByFromContext(ctx),
 		flowStack:   []string{wf.Name},
 	}
@@ -358,7 +392,7 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 		}
 
 		execTask := task
-		execTask.Env = env.MergeTaskEnv(opts.baseEnv, task.Env)
+		execTask.Env = env.MergeRunEnv(opts.baseEnv, task.Env, opts.runEnv)
 		execTask.Include = mergeIncludes(wf.Include, task.Include)
 		if execTask.BaseDir == "" {
 			if wf.BaseDir != "" {
@@ -509,6 +543,7 @@ func (e *Engine) executeSubflowTask(
 
 	childOpts := runOptions{
 		baseEnv:      task.Env,
+		runEnv:       parentOpts.runEnv,
 		parentRunID:  parentRunID,
 		parentTaskID: task.ID,
 		triggeredBy:  parentOpts.triggeredBy,

@@ -7,7 +7,7 @@ Freud is a single-binary Go container workflow orchestrator (`CGO_ENABLED=0`) wi
 - `main.go` — CLI entrypoint (`run`, `dream`, `tui`, `mcp`, `cache ls|clear`).
 - `internal/workflow/` — YAML parser, validator, cycle detector, topological sort (`Workflow`, `Task`, canonical `SpecMarkdown`).
 - `internal/cron/` — 5-field cron & macro parser.
-- `internal/env/` — `.env` loader (`LoadDefault`, `ParseFile`, `SortedKeys`). **Values are never logged or exposed via API/MCP.**
+- `internal/env/` — `.env` loader, per-run env validation & merging (`LoadDefault`, `ParseFile`, `ValidateEnvMap`, `MergeRunEnv`, `SortedKeys`). **Values are never logged or exposed via API/MCP.**
 - `internal/db/` — Unified store supporting **SQLite**, **PostgreSQL**, and **MySQL/MariaDB** (`runs`, `task_runs`, `users`, `sessions`, `api_tokens`, `audit_logs`, `settings`).
 - `internal/runner/` — Docker SDK execution & `orchestrator-cache:*` dependency layer caching.
 - `internal/engine/` — Pipeline execution engine, subflows (`flow:`), workspace management, kill propagation, `TriggeredBy` context.

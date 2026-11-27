@@ -123,6 +123,87 @@ func SortedKeys(vars map[string]string) []string {
 	return keys
 }
 
+// ValidateEnvKey checks that key is a valid POSIX-style environment variable identifier.
+func ValidateEnvKey(key string) (string, error) {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return "", fmt.Errorf("env variable name must not be empty")
+	}
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		isLetter := (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_'
+		isDigit := ch >= '0' && ch <= '9'
+		if i == 0 && !isLetter {
+			return "", fmt.Errorf("invalid env variable name %q: must start with A-Z, a-z, or _", key)
+		}
+		if !isLetter && !isDigit {
+			return "", fmt.Errorf("invalid env variable name %q: must contain only A-Z, a-z, 0-9, or _", key)
+		}
+	}
+	return trimmed, nil
+}
+
+// ValidateEnvMap validates keys and values in an env override map and returns a clean copy.
+func ValidateEnvMap(raw map[string]string) (map[string]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		cleanKey, err := ValidateEnvKey(k)
+		if err != nil {
+			return nil, err
+		}
+		if strings.ContainsRune(v, 0) {
+			return nil, fmt.Errorf("invalid value for env variable %q: null bytes are not allowed", cleanKey)
+		}
+		if _, exists := out[cleanKey]; exists {
+			return nil, fmt.Errorf("duplicate env variable %q", cleanKey)
+		}
+		out[cleanKey] = v
+	}
+	return out, nil
+}
+
+// ParseEnvAssignments parses repeatable KEY=VALUE entries (used by CLI -e/--env flags).
+func ParseEnvAssignments(items []string) (map[string]string, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(items))
+	for _, item := range items {
+		k, v, ok := strings.Cut(item, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid env assignment %q: expected KEY=VALUE", item)
+		}
+		cleanKey, err := ValidateEnvKey(k)
+		if err != nil {
+			return nil, err
+		}
+		if strings.ContainsRune(v, 0) {
+			return nil, fmt.Errorf("invalid value for env variable %q: null bytes are not allowed", cleanKey)
+		}
+		out[cleanKey] = v
+	}
+	return out, nil
+}
+
+// ParseEnvLines parses newline-delimited KEY=VALUE entries (skipping blank lines and # comments).
+func ParseEnvLines(text string) (map[string]string, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, nil
+	}
+	var items []string
+	for _, rawLine := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(rawLine, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		items = append(items, line)
+	}
+	return ParseEnvAssignments(items)
+}
+
 // MergeTaskEnv combines base environment variables (e.g. from .env) with task-specific env entries.
 // Task entries override base entries and may reference base entries via ${VAR}.
 func MergeTaskEnv(baseEnv, taskEnv map[string]string) map[string]string {
@@ -136,6 +217,29 @@ func MergeTaskEnv(baseEnv, taskEnv map[string]string) map[string]string {
 	}
 	for k, v := range taskEnv {
 		merged[k] = expandBracedVars(v, baseEnv)
+	}
+	return merged
+}
+
+// MergeRunEnv merges base (.env), task.Env, and per-run overrides.
+// Per-run overrides feed ${VAR} expansion in task.Env and take final precedence over both .env and task.Env.
+func MergeRunEnv(baseEnv, taskEnv, runEnv map[string]string) map[string]string {
+	if len(runEnv) == 0 {
+		return MergeTaskEnv(baseEnv, taskEnv)
+	}
+	effectiveBase := make(map[string]string, len(baseEnv)+len(runEnv))
+	for k, v := range baseEnv {
+		effectiveBase[k] = v
+	}
+	for k, v := range runEnv {
+		effectiveBase[k] = v
+	}
+	merged := MergeTaskEnv(effectiveBase, taskEnv)
+	if merged == nil {
+		merged = make(map[string]string, len(runEnv))
+	}
+	for k, v := range runEnv {
+		merged[k] = v
 	}
 	return merged
 }

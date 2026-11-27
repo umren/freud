@@ -12,6 +12,7 @@ import (
 
 	"freud/internal/cron"
 	"freud/internal/engine"
+	"freud/internal/env"
 	"freud/internal/service"
 	"freud/internal/syncer"
 	"freud/internal/workflow"
@@ -37,9 +38,11 @@ type flowsViewData struct {
 	basePageData
 	FlowsDir string
 	Flows    []flowRowView
+	CanRun   bool
 	Sync     syncer.Status
 	SyncMsg  string
 	SyncErr  string
+	FlashErr string
 }
 
 type flowDetailItem struct {
@@ -60,6 +63,7 @@ type flowDetailViewData struct {
 	YAMLLines  []codeLine
 	DAG        DAGGraph
 	RecentRuns []runRowView
+	FlashErr   string
 }
 
 func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request) {
@@ -127,9 +131,11 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request) {
 		basePageData: s.newBaseData(r, "Flows", "flows", stats.Running),
 		FlowsDir:     s.cfg.FlowsDir,
 		Flows:        rows,
+		CanRun:       s.runner != nil,
 		Sync:         syncStatus,
 		SyncMsg:      r.URL.Query().Get("sync_msg"),
 		SyncErr:      r.URL.Query().Get("sync_err"),
+		FlashErr:     r.URL.Query().Get("err"),
 	})
 }
 
@@ -178,18 +184,28 @@ func (s *Server) findFlowEntry(w http.ResponseWriter, fileName string) (*workflo
 	return matched, true
 }
 
-func (s *Server) launchFlowAsync(auditCtx context.Context, actor, source, extraDetails string, wf *workflow.Workflow) (string, int, error) {
+func (s *Server) launchFlowAsync(auditCtx context.Context, actor, source, extraDetails string, wf *workflow.Workflow, runEnv map[string]string) (string, int, error) {
 	if s.runner == nil {
 		return "", http.StatusServiceUnavailable, fmt.Errorf("execution runner is not configured")
 	}
+	cleanEnv, err := env.ValidateEnvMap(runEnv)
+	if err != nil {
+		return "", http.StatusBadRequest, err
+	}
 
 	runCtx := engine.WithTriggeredBy(s.runCtx, actor)
+	if len(cleanEnv) > 0 {
+		runCtx = engine.WithRunEnv(runCtx, cleanEnv)
+	}
 	runID, doneCh, err := s.runner.StartAsync(runCtx, wf)
 	if err != nil {
 		return "", http.StatusInternalServerError, fmt.Errorf("start workflow %q: %w", wf.Name, err)
 	}
 
 	details := "run_id=" + runID
+	if envKeys := env.SortedKeys(cleanEnv); len(envKeys) > 0 {
+		details += ", env_keys=" + strings.Join(envKeys, ",")
+	}
 	if extraDetails != "" {
 		details += ", " + extraDetails
 	}
@@ -264,7 +280,41 @@ func (s *Server) handleFlowDetail(w http.ResponseWriter, r *http.Request) {
 		YAMLLines:  HighlightWorkflowYAML(matched.RawYAML),
 		DAG:        BuildDAGLayout(dagInput),
 		RecentRuns: toRunRowViews(recentRaw, now),
+		FlashErr:   r.URL.Query().Get("err"),
 	})
+}
+
+func parseRunEnvFromForm(r *http.Request) (map[string]string, error) {
+	if err := r.ParseForm(); err != nil {
+		return nil, fmt.Errorf("parse form parameters: %w", err)
+	}
+	parsed, err := env.ParseEnvLines(r.FormValue("env"))
+	if err != nil {
+		return nil, err
+	}
+	keys := r.Form["env_key"]
+	vals := r.Form["env_val"]
+	for i, rawK := range keys {
+		val := ""
+		if i < len(vals) {
+			val = vals[i]
+		}
+		if strings.TrimSpace(rawK) == "" && val == "" {
+			continue
+		}
+		cleanKey, err := env.ValidateEnvKey(rawK)
+		if err != nil {
+			return nil, err
+		}
+		if strings.ContainsRune(val, 0) {
+			return nil, fmt.Errorf("invalid value for env variable %q: null bytes are not allowed", cleanKey)
+		}
+		if parsed == nil {
+			parsed = make(map[string]string, len(keys))
+		}
+		parsed[cleanKey] = val
+	}
+	return parsed, nil
 }
 
 func (s *Server) handleRunFlow(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +323,22 @@ func (s *Server) handleRunFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runID, status, err := s.launchFlowAsync(r.Context(), s.actorName(r), "dream", "", matched.Workflow)
+	runEnv, err := parseRunEnvFromForm(r)
+	if err != nil {
+		errTarget := "/flows/" + url.PathEscape(matched.FileName) + "?err=" + url.QueryEscape(err.Error())
+		if r.FormValue("return_to") == "flows" {
+			errTarget = "/flows?err=" + url.QueryEscape(err.Error())
+		}
+		if r.Header.Get("HX-Request") == "true" {
+			w.Header().Set("HX-Redirect", errTarget)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.Redirect(w, r, errTarget, http.StatusSeeOther)
+		return
+	}
+
+	runID, status, err := s.launchFlowAsync(r.Context(), s.actorName(r), "dream", "", matched.Workflow, runEnv)
 	if err != nil {
 		http.Error(w, err.Error(), status)
 		return

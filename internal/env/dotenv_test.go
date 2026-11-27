@@ -146,3 +146,46 @@ func TestMergeTaskEnv(t *testing.T) {
 		t.Fatalf("expected unknown/bare vars untouched, got %q", merged["LITERAL"])
 	}
 }
+
+func TestValidateAndMergeRunEnv(t *testing.T) {
+	for _, good := range []string{"A", "TARGET_DATE", "_PRIV_1", "a1_b2"} {
+		clean, err := ValidateEnvKey("  " + good + " ")
+		if err != nil || clean != good {
+			t.Fatalf("expected valid key %q, got %q err=%v", good, clean, err)
+		}
+	}
+	for _, bad := range []string{"", "1ABC", "BAD-KEY", "A=B", "HAS SPACE", "LINE\nBREAK"} {
+		if _, err := ValidateEnvKey(bad); err == nil {
+			t.Fatalf("expected invalid key %q to fail", bad)
+		}
+	}
+
+	if _, err := ValidateEnvMap(map[string]string{"OK": "bad\x00val"}); err == nil {
+		t.Fatal("expected NUL byte env value to fail")
+	}
+	if _, err := ValidateEnvMap(map[string]string{"DUP": "1", " DUP": "2"}); err == nil {
+		t.Fatal("expected duplicate trimmed key to fail")
+	}
+
+	parsed, err := ParseEnvAssignments([]string{"DATE=2026-11-20", "EXPR=a=b=c"})
+	if err != nil || parsed["DATE"] != "2026-11-20" || parsed["EXPR"] != "a=b=c" {
+		t.Fatalf("unexpected ParseEnvAssignments result: %+v err=%v", parsed, err)
+	}
+	if _, err := ParseEnvAssignments([]string{"MISSING_EQ"}); err == nil {
+		t.Fatal("expected missing '=' to fail")
+	}
+
+	lines, err := ParseEnvLines("# comment\n\nTARGET_DATE=2026-11-21\nEMPTY=\n")
+	if err != nil || lines["TARGET_DATE"] != "2026-11-21" || lines["EMPTY"] != "" {
+		t.Fatalf("unexpected ParseEnvLines result: %+v err=%v", lines, err)
+	}
+
+	merged := MergeRunEnv(
+		map[string]string{"BASE": "base-v", "DATE": "from-dotenv"},
+		map[string]string{"DATE": "default-in-yaml", "EXPANDED": "run=${DATE}", "FROM_BASE": "${BASE}"},
+		map[string]string{"DATE": "2026-11-22", "EXTRA": "override"},
+	)
+	if merged["BASE"] != "base-v" || merged["DATE"] != "2026-11-22" || merged["EXPANDED"] != "run=2026-11-22" || merged["FROM_BASE"] != "base-v" || merged["EXTRA"] != "override" {
+		t.Fatalf("unexpected MergeRunEnv result: %+v", merged)
+	}
+}

@@ -20,13 +20,20 @@ import (
 )
 
 type mockMCPRunner struct {
-	store    *db.Store
-	killedID string
+	store          *db.Store
+	killedID       string
+	seq            int
+	capturedRunEnv map[string]string
 }
 
 func (m *mockMCPRunner) StartAsync(ctx context.Context, wf *workflow.Workflow) (string, <-chan error, error) {
 	actor := engine.TriggeredByFromContext(ctx)
+	m.capturedRunEnv = engine.RunEnvFromContext(ctx)
+	m.seq++
 	runID := "mcp-run-1"
+	if m.seq > 1 {
+		runID = "mcp-run-" + string(rune('0'+m.seq))
+	}
 	if err := m.store.CreateRunFull(ctx, runID, wf.Name, "", "", "", actor); err != nil {
 		return "", nil, err
 	}
@@ -488,5 +495,28 @@ func TestMCPAgentMadnessAndTokenScopes(t *testing.T) {
 		if logs[0].Username != "alice" || logs[0].Source != "mcp" {
 			t.Fatalf("unexpected audit actor/source for %s: %+v", action, logs[0])
 		}
+	}
+
+	// Per-run env via run_flow: passed to runner, keys audited without values, invalid key rejected.
+	if msg, failed := callMCPTool(t, srvOn, runCtx, "run_flow", map[string]any{
+		"file": "mcp.yaml",
+		"env":  map[string]string{"BAD-KEY": "1"},
+	}); !failed || !strings.Contains(msg, "invalid env variable") {
+		t.Fatalf("expected invalid env key error in run_flow, got failed=%v msg=%s", failed, msg)
+	}
+	txt, isErr = callMCPTool(t, srvOn, runCtx, "run_flow", map[string]any{
+		"file": "mcp.yaml",
+		"env":  map[string]string{"TARGET_DATE": "2026-11-20", "SECRET": "topsecret_mcp"},
+	})
+	srvOn.Wait()
+	if isErr || !strings.Contains(txt, "SECRET") || !strings.Contains(txt, "TARGET_DATE") || strings.Contains(txt, "topsecret_mcp") {
+		t.Fatalf("unexpected run_flow response with env: err=%v txt=%s", isErr, txt)
+	}
+	if runner.capturedRunEnv["TARGET_DATE"] != "2026-11-20" || runner.capturedRunEnv["SECRET"] != "topsecret_mcp" {
+		t.Fatalf("expected capturedRunEnv on MCP runner, got %+v", runner.capturedRunEnv)
+	}
+	runLogs, _, err := store.ListAuditLogsPage(context.Background(), db.AuditQuery{Action: "FLOW_RUN", Limit: 5})
+	if err != nil || len(runLogs) == 0 || !strings.Contains(runLogs[0].Details.String, "env_keys=SECRET,TARGET_DATE") || strings.Contains(runLogs[0].Details.String, "topsecret_mcp") {
+		t.Fatalf("unexpected FLOW_RUN audit details for MCP per-run env: %+v err=%v", runLogs, err)
 	}
 }
