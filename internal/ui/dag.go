@@ -189,6 +189,8 @@ func statusSlug(status string) string {
 		return "running"
 	case "KILLED":
 		return "killed"
+	case "SKIPPED":
+		return "skipped"
 	case "PENDING":
 		return "pending"
 	default:

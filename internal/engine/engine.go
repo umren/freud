@@ -57,6 +57,7 @@ type Engine struct {
 	errOut         io.Writer
 	wg             sync.WaitGroup
 
+	outMu      sync.Mutex
 	runsMu     sync.Mutex
 	activeRuns map[string]*activeRun
 }
@@ -348,126 +349,291 @@ func (e *Engine) prepareRun(ctx context.Context, wf *workflow.Workflow, opts run
 	return runID, hostWorkspace, orderedTasks, nil
 }
 
+func (e *Engine) logOut(format string, args ...any) {
+	e.outMu.Lock()
+	defer e.outMu.Unlock()
+	fmt.Fprintf(e.stdout(), format, args...)
+}
+
+type dagTaskState int
+
+const (
+	dagPending dagTaskState = iota
+	dagRunning
+	dagSuccess
+	dagFailed
+	dagSkipped
+	dagAborted
+)
+
+type dagCompletion struct {
+	taskID   string
+	state    dagTaskState
+	exitCode int64
+	err      error
+}
+
 func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf *workflow.Workflow, orderedTasks []workflow.Task, opts runOptions) error {
-	out := e.stdout()
-	c := term.ColorEnabledWriter(out)
-	fmt.Fprintf(out, "%s Starting workflow %s %s\n",
+	c := term.ColorEnabledWriter(e.stdout())
+	e.logOut("%s Starting workflow %s %s\n",
 		term.Tag(c, "engine"),
 		term.Key(c, fmt.Sprintf("%q", wf.Name)),
 		term.Muted(c, fmt.Sprintf("(run_id=%s, workspace=%s)", runID, hostWorkspace)),
 	)
 
-	for _, task := range orderedTasks {
-		if ctx.Err() != nil {
-			return e.finishCanceledRun(runID, wf.Name, ctx.Err())
-		}
-
-		if task.Flow != "" {
-			fmt.Fprintf(out, "%s Running subflow task %s %s\n",
-				term.Tag(c, "engine"),
-				term.Key(c, fmt.Sprintf("%q", task.ID)),
-				term.Muted(c, fmt.Sprintf("(flow=%q, wait=%v)", task.Flow, task.ShouldWait())),
-			)
-		} else if task.Image != "" {
-			fmt.Fprintf(out, "%s Running task %s %s\n",
-				term.Tag(c, "engine"),
-				term.Key(c, fmt.Sprintf("%q", task.ID)),
-				term.Muted(c, fmt.Sprintf("(runtime=%s, image=%s)", task.Runtime, task.Image)),
-			)
-		} else {
-			fmt.Fprintf(out, "%s Running task %s %s\n",
-				term.Tag(c, "engine"),
-				term.Key(c, fmt.Sprintf("%q", task.ID)),
-				term.Muted(c, fmt.Sprintf("(runtime=%s)", task.Runtime)),
-			)
-		}
-
-		taskRunID, err := e.store.CreateTaskRunWithMeta(ctx, runID, task.ID, task.Runtime, task.Image)
-		if err != nil {
-			if e.isKilled(runID) {
-				return e.finishCanceledRun(runID, wf.Name, ctx.Err())
+	states := make(map[string]dagTaskState, len(orderedTasks))
+	depsOf := make(map[string][]string, len(orderedTasks))
+	remaining := make(map[string]int, len(orderedTasks))
+	dependents := make(map[string][]string, len(orderedTasks))
+	for _, t := range orderedTasks {
+		states[t.ID] = dagPending
+		seen := make(map[string]struct{}, len(t.DependsOn))
+		var uniq []string
+		for _, d := range t.DependsOn {
+			if _, ok := seen[d]; ok {
+				continue
 			}
-			e.markRunFailed(runID)
-			return fmt.Errorf("record task %q start: %w", task.ID, err)
+			seen[d] = struct{}{}
+			uniq = append(uniq, d)
+			dependents[d] = append(dependents[d], t.ID)
 		}
+		depsOf[t.ID] = uniq
+		remaining[t.ID] = len(uniq)
+	}
 
-		execTask := task
-		execTask.Env = env.MergeRunEnv(opts.baseEnv, task.Env, opts.runEnv)
-		execTask.Include = mergeIncludes(wf.Include, task.Include)
-		if execTask.BaseDir == "" {
-			if wf.BaseDir != "" {
-				execTask.BaseDir = wf.BaseDir
-			} else {
-				execTask.BaseDir = "."
-			}
+	var sem chan struct{}
+	if wf.Concurrency > 0 {
+		sem = make(chan struct{}, wf.Concurrency)
+	}
+
+	resultsCh := make(chan dagCompletion, len(orderedTasks))
+	inFlight := 0
+	var firstErr error
+	var failMu sync.RWMutex
+	hasFailure := func() bool {
+		failMu.RLock()
+		defer failMu.RUnlock()
+		return firstErr != nil
+	}
+	setFailure := func(err error) {
+		if err == nil {
+			return
 		}
-
-		var res *runner.Result
-		var runErr error
-		if task.Flow != "" {
-			res, runErr = e.executeSubflowTask(ctx, runID, taskRunID, wf, execTask, opts)
-		} else {
-			res, runErr = e.runTaskWithLiveLogs(ctx, runID, hostWorkspace, taskRunID, execTask)
+		failMu.Lock()
+		if firstErr == nil {
+			firstErr = err
 		}
+		failMu.Unlock()
+	}
 
-		var exitCode int64 = -1
-		var logs string
-		if res != nil {
-			exitCode = res.ExitCode
-			logs = res.Logs
+	markTerminal := func(id string, st dagTaskState) {
+		states[id] = st
+		for _, childID := range dependents[id] {
+			remaining[childID]--
 		}
+	}
 
-		if e.isKilled(runID) {
-			if logs != "" {
-				logs += "\n"
-			}
-			logs += "[freud] Execution killed by user"
-			e.markTaskFinished(taskRunID, db.StatusKilled, exitCode, logs)
-			e.markRunStatus(runID, db.StatusKilled)
-			fmt.Fprintf(out, "%s Task %s %s\n", term.Tag(c, "engine"), term.Key(c, fmt.Sprintf("%q", task.ID)), term.Status(c, "KILLED"))
-			fmt.Fprintf(out, "%s Workflow %s %s %s\n",
-				term.Tag(c, "engine"),
-				term.Key(c, fmt.Sprintf("%q", wf.Name)),
-				term.Muted(c, fmt.Sprintf("(run_id=%s)", runID)),
-				term.Status(c, "KILLED"),
-			)
-			return fmt.Errorf("task %q: %w", task.ID, ErrRunKilled)
+	skipTask := func(task workflow.Task, reason string) error {
+		if err := e.recordSkippedTask(ctx, runID, task, reason); err != nil {
+			markTerminal(task.ID, dagFailed)
+			setFailure(err)
+			return err
 		}
-
-		if runErr != nil || exitCode != 0 {
-			if runErr != nil {
-				if logs != "" {
-					logs += "\n"
-				}
-				logs += fmt.Sprintf("[freud error] %v", runErr)
-			}
-
-			e.markTaskFinished(taskRunID, db.StatusFailed, exitCode, logs)
-			e.markRunFailed(runID)
-
-			fmt.Fprintf(out, "%s Task %s %s %s. Aborting workflow.\n",
-				term.Tag(c, "engine"),
-				term.Key(c, fmt.Sprintf("%q", task.ID)),
-				term.Status(c, "FAILED"),
-				term.Muted(c, fmt.Sprintf("(exit_code=%d)", exitCode)),
-			)
-			if runErr != nil {
-				return fmt.Errorf("task %q failed: %w", task.ID, runErr)
-			}
-			return fmt.Errorf("task %q exited with non-zero code %d", task.ID, exitCode)
-		}
-
-		e.markTaskFinished(taskRunID, db.StatusSuccess, exitCode, logs)
-		fmt.Fprintf(out, "%s Task %s %s %s\n",
+		markTerminal(task.ID, dagSkipped)
+		e.logOut("%s Task %s %s %s\n",
 			term.Tag(c, "engine"),
 			term.Key(c, fmt.Sprintf("%q", task.ID)),
-			term.Status(c, "SUCCEEDED"),
-			term.Muted(c, fmt.Sprintf("(exit_code=%d)", exitCode)),
+			term.Status(c, db.StatusSkipped),
+			term.Muted(c, "("+reason+")"),
 		)
+		return nil
+	}
+
+	launchTask := func(task, execTask workflow.Task) {
+		states[task.ID] = dagRunning
+		inFlight++
+		whenRule := task.NormalizedWhen()
+		go func() {
+			if sem != nil {
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+					resultsCh <- dagCompletion{taskID: task.ID, state: dagAborted}
+					return
+				}
+			}
+			if e.isKilled(runID) || ctx.Err() != nil {
+				resultsCh <- dagCompletion{taskID: task.ID, state: dagAborted}
+				return
+			}
+			if whenRule == workflow.WhenOnSuccess && hasFailure() {
+				resultsCh <- dagCompletion{taskID: task.ID, state: dagAborted}
+				return
+			}
+
+			st, exitCode, err := e.executeTaskWithRetries(ctx, runID, hostWorkspace, wf, task, execTask, opts)
+			resultsCh <- dagCompletion{
+				taskID:   task.ID,
+				state:    st,
+				exitCode: exitCode,
+				err:      err,
+			}
+		}()
+	}
+
+	isGlobalOnFailure := func(t workflow.Task) bool {
+		return t.NormalizedWhen() == workflow.WhenOnFailure && len(depsOf[t.ID]) == 0
+	}
+
+	for {
+		progressed := true
+		for progressed {
+			progressed = false
+			for _, task := range orderedTasks {
+				if states[task.ID] != dagPending || isGlobalOnFailure(task) {
+					continue
+				}
+				if e.isKilled(runID) || ctx.Err() != nil {
+					markTerminal(task.ID, dagAborted)
+					progressed = true
+					continue
+				}
+				if remaining[task.ID] > 0 {
+					continue
+				}
+
+				anyDepFailed := false
+				anyDepSkipped := false
+				anyDepAborted := false
+				for _, depID := range depsOf[task.ID] {
+					switch states[depID] {
+					case dagFailed:
+						anyDepFailed = true
+					case dagSkipped:
+						anyDepSkipped = true
+					case dagAborted:
+						anyDepAborted = true
+					}
+				}
+
+				whenRule := task.NormalizedWhen()
+				switch whenRule {
+				case workflow.WhenOnSuccess:
+					if anyDepFailed || anyDepAborted || hasFailure() {
+						markTerminal(task.ID, dagAborted)
+						progressed = true
+						continue
+					}
+					if anyDepSkipped {
+						_ = skipTask(task, "upstream task skipped")
+						progressed = true
+						continue
+					}
+				case workflow.WhenOnFailure:
+					if !anyDepFailed {
+						_ = skipTask(task, "when=on_failure and no dependency failed")
+						progressed = true
+						continue
+					}
+				case workflow.WhenAlways:
+					if anyDepAborted && e.isKilled(runID) {
+						markTerminal(task.ID, dagAborted)
+						progressed = true
+						continue
+					}
+				}
+
+				execTask := e.prepareExecTask(wf, task, opts)
+				if task.If != "" {
+					condOK, condErr := workflow.EvalCondition(task.If, execTask.Env)
+					if condErr != nil {
+						setFailure(fmt.Errorf("task %q condition failed: %w", task.ID, condErr))
+						markTerminal(task.ID, dagFailed)
+						progressed = true
+						continue
+					}
+					if !condOK {
+						_ = skipTask(task, fmt.Sprintf("condition %q evaluated to false", task.If))
+						progressed = true
+						continue
+					}
+				}
+
+				launchTask(task, execTask)
+				progressed = true
+			}
+		}
+
+		// When all regular / dependency-scoped tasks have settled, evaluate global when=on_failure handlers.
+		if inFlight == 0 {
+			regularPending := false
+			for _, task := range orderedTasks {
+				if states[task.ID] == dagPending && !isGlobalOnFailure(task) {
+					regularPending = true
+					break
+				}
+			}
+			if !regularPending {
+				launchedGlobal := false
+				for _, task := range orderedTasks {
+					if states[task.ID] != dagPending || !isGlobalOnFailure(task) || remaining[task.ID] > 0 {
+						continue
+					}
+					if e.isKilled(runID) || ctx.Err() != nil {
+						markTerminal(task.ID, dagAborted)
+						continue
+					}
+					if !hasFailure() {
+						_ = skipTask(task, "when=on_failure and workflow succeeded")
+						continue
+					}
+					execTask := e.prepareExecTask(wf, task, opts)
+					if task.If != "" {
+						condOK, condErr := workflow.EvalCondition(task.If, execTask.Env)
+						if condErr != nil {
+							setFailure(fmt.Errorf("task %q condition failed: %w", task.ID, condErr))
+							markTerminal(task.ID, dagFailed)
+							continue
+						}
+						if !condOK {
+							_ = skipTask(task, fmt.Sprintf("condition %q evaluated to false", task.If))
+							continue
+						}
+					}
+					launchTask(task, execTask)
+					launchedGlobal = true
+				}
+				if launchedGlobal {
+					continue
+				}
+			}
+		}
+
+		if inFlight == 0 {
+			break
+		}
+
+		comp := <-resultsCh
+		inFlight--
+		if comp.err != nil {
+			setFailure(comp.err)
+		}
+		markTerminal(comp.taskID, comp.state)
 	}
 
 	if e.isKilled(runID) {
 		return e.finishCanceledRun(runID, wf.Name, ctx.Err())
+	}
+	if ctx.Err() != nil && !hasFailure() {
+		return e.finishCanceledRun(runID, wf.Name, ctx.Err())
+	}
+	if hasFailure() {
+		e.markRunFailed(runID)
+		failMu.RLock()
+		errOut := firstErr
+		failMu.RUnlock()
+		return errOut
 	}
 
 	if err := e.store.FinishRun(ctx, runID, db.StatusSuccess); err != nil {
@@ -477,13 +643,200 @@ func (e *Engine) executeRun(ctx context.Context, runID, hostWorkspace string, wf
 		return fmt.Errorf("record workflow run completion: %w", err)
 	}
 
-	fmt.Fprintf(out, "%s Workflow %s %s %s\n",
+	e.logOut("%s Workflow %s %s %s\n",
 		term.Tag(c, "engine"),
 		term.Key(c, fmt.Sprintf("%q", wf.Name)),
 		term.Muted(c, fmt.Sprintf("(run_id=%s)", runID)),
 		term.Status(c, "SUCCEEDED"),
 	)
 	return nil
+}
+
+func (e *Engine) prepareExecTask(wf *workflow.Workflow, task workflow.Task, opts runOptions) workflow.Task {
+	execTask := task
+	execTask.Env = env.MergeRunEnv(opts.baseEnv, task.Env, opts.runEnv)
+	execTask.Include = mergeIncludes(wf.Include, task.Include)
+	if execTask.BaseDir == "" {
+		if wf.BaseDir != "" {
+			execTask.BaseDir = wf.BaseDir
+		} else {
+			execTask.BaseDir = "."
+		}
+	}
+	return execTask
+}
+
+func (e *Engine) recordSkippedTask(ctx context.Context, runID string, task workflow.Task, reason string) error {
+	taskRunID, err := e.store.CreateTaskRunWithMeta(ctx, runID, task.ID, task.Runtime, task.Image)
+	if err != nil {
+		return fmt.Errorf("record skipped task %q: %w", task.ID, err)
+	}
+	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	msg := "[freud] Skipped"
+	if reason != "" {
+		msg += ": " + reason
+	}
+	if err := e.store.FinishTaskRun(dbCtx, taskRunID, db.StatusSkipped, 0, msg); err != nil {
+		return fmt.Errorf("finish skipped task %q: %w", task.ID, err)
+	}
+	return nil
+}
+
+func (e *Engine) executeTaskWithRetries(
+	ctx context.Context,
+	runID, hostWorkspace string,
+	wf *workflow.Workflow,
+	task, execTask workflow.Task,
+	opts runOptions,
+) (dagTaskState, int64, error) {
+	c := term.ColorEnabledWriter(e.stdout())
+	if task.Flow != "" {
+		e.logOut("%s Running subflow task %s %s\n",
+			term.Tag(c, "engine"),
+			term.Key(c, fmt.Sprintf("%q", task.ID)),
+			term.Muted(c, fmt.Sprintf("(flow=%q, wait=%v)", task.Flow, task.ShouldWait())),
+		)
+	} else if task.Image != "" {
+		e.logOut("%s Running task %s %s\n",
+			term.Tag(c, "engine"),
+			term.Key(c, fmt.Sprintf("%q", task.ID)),
+			term.Muted(c, fmt.Sprintf("(runtime=%s, image=%s)", task.Runtime, task.Image)),
+		)
+	} else {
+		e.logOut("%s Running task %s %s\n",
+			term.Tag(c, "engine"),
+			term.Key(c, fmt.Sprintf("%q", task.ID)),
+			term.Muted(c, fmt.Sprintf("(runtime=%s)", task.Runtime)),
+		)
+	}
+
+	taskRunID, err := e.store.CreateTaskRunWithMeta(ctx, runID, task.ID, task.Runtime, task.Image)
+	if err != nil {
+		if e.isKilled(runID) {
+			return dagAborted, -1, ErrRunKilled
+		}
+		return dagFailed, -1, fmt.Errorf("record task %q start: %w", task.ID, err)
+	}
+
+	attempts := 1 + task.Retries
+	timeout := task.TimeoutDuration()
+	retryDelay := task.RetryDelayDuration()
+
+	var combinedLogs strings.Builder
+	var lastExitCode int64 = -1
+	var lastErr error
+
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > 1 {
+			e.logOut("%s Retrying task %s %s\n",
+				term.Tag(c, "engine"),
+				term.Key(c, fmt.Sprintf("%q", task.ID)),
+				term.Muted(c, fmt.Sprintf("(attempt=%d/%d, delay=%s)", attempt, attempts, retryDelay)),
+			)
+			if retryDelay > 0 {
+				timer := time.NewTimer(retryDelay)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					if e.isKilled(runID) {
+						if combinedLogs.Len() > 0 {
+							combinedLogs.WriteString("\n")
+						}
+						combinedLogs.WriteString("[freud] Execution killed by user")
+						e.markTaskFinished(taskRunID, db.StatusKilled, lastExitCode, combinedLogs.String())
+						return dagAborted, lastExitCode, ErrRunKilled
+					}
+					e.markTaskFinished(taskRunID, db.StatusFailed, lastExitCode, combinedLogs.String())
+					return dagFailed, lastExitCode, ctx.Err()
+				}
+			}
+			if combinedLogs.Len() > 0 && !strings.HasSuffix(combinedLogs.String(), "\n") {
+				combinedLogs.WriteString("\n")
+			}
+			fmt.Fprintf(&combinedLogs, "[freud] Retry attempt %d/%d\n", attempt, attempts)
+			dbCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = e.store.UpdateTaskRunLogs(dbCtx, taskRunID, combinedLogs.String())
+			cancel()
+		}
+
+		attemptCtx := ctx
+		var timeoutCancel context.CancelFunc
+		if timeout > 0 {
+			attemptCtx, timeoutCancel = context.WithTimeout(ctx, timeout)
+		}
+
+		var res *runner.Result
+		var runErr error
+		if task.Flow != "" {
+			res, runErr = e.executeSubflowTask(attemptCtx, runID, taskRunID, wf, execTask, opts)
+		} else {
+			res, runErr = e.runTaskWithLiveLogs(attemptCtx, runID, hostWorkspace, taskRunID, execTask, combinedLogs.String())
+		}
+		timedOut := timeout > 0 && errors.Is(attemptCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+		if timeoutCancel != nil {
+			timeoutCancel()
+		}
+
+		var exitCode int64 = -1
+		var attemptLogs string
+		if res != nil {
+			exitCode = res.ExitCode
+			attemptLogs = res.Logs
+		}
+		lastExitCode = exitCode
+
+		if attemptLogs != "" {
+			combinedLogs.WriteString(attemptLogs)
+		}
+
+		if e.isKilled(runID) {
+			if combinedLogs.Len() > 0 && !strings.HasSuffix(combinedLogs.String(), "\n") {
+				combinedLogs.WriteString("\n")
+			}
+			combinedLogs.WriteString("[freud] Execution killed by user")
+			e.markTaskFinished(taskRunID, db.StatusKilled, exitCode, combinedLogs.String())
+			e.logOut("%s Task %s %s\n", term.Tag(c, "engine"), term.Key(c, fmt.Sprintf("%q", task.ID)), term.Status(c, "KILLED"))
+			return dagAborted, exitCode, ErrRunKilled
+		}
+
+		if runErr == nil && exitCode == 0 {
+			e.markTaskFinished(taskRunID, db.StatusSuccess, exitCode, combinedLogs.String())
+			e.logOut("%s Task %s %s %s\n",
+				term.Tag(c, "engine"),
+				term.Key(c, fmt.Sprintf("%q", task.ID)),
+				term.Status(c, "SUCCEEDED"),
+				term.Muted(c, fmt.Sprintf("(exit_code=%d)", exitCode)),
+			)
+			return dagSuccess, exitCode, nil
+		}
+
+		if timedOut {
+			runErr = fmt.Errorf("task %q timed out after %s", task.ID, timeout)
+		} else if runErr == nil {
+			runErr = fmt.Errorf("task %q exited with non-zero code %d", task.ID, exitCode)
+		}
+		lastErr = runErr
+
+		if combinedLogs.Len() > 0 && !strings.HasSuffix(combinedLogs.String(), "\n") {
+			combinedLogs.WriteString("\n")
+		}
+		fmt.Fprintf(&combinedLogs, "[freud error] %v\n", runErr)
+
+		if ctx.Err() != nil {
+			break
+		}
+	}
+
+	e.markTaskFinished(taskRunID, db.StatusFailed, lastExitCode, combinedLogs.String())
+	e.logOut("%s Task %s %s %s\n",
+		term.Tag(c, "engine"),
+		term.Key(c, fmt.Sprintf("%q", task.ID)),
+		term.Status(c, "FAILED"),
+		term.Muted(c, fmt.Sprintf("(exit_code=%d)", lastExitCode)),
+	)
+	return dagFailed, lastExitCode, lastErr
 }
 
 func (e *Engine) finishCanceledRun(runID, workflowName string, ctxErr error) error {
@@ -589,7 +942,7 @@ func (e *Engine) executeSubflowTask(
 	return &runner.Result{ExitCode: 0, Logs: logBuf.String()}, nil
 }
 
-func (e *Engine) runTaskWithLiveLogs(ctx context.Context, runID, hostWorkspace string, taskRunID int64, task workflow.Task) (*runner.Result, error) {
+func (e *Engine) runTaskWithLiveLogs(ctx context.Context, runID, hostWorkspace string, taskRunID int64, task workflow.Task, logPrefix string) (*runner.Result, error) {
 	sr, ok := e.runner.(StreamingTaskRunner)
 	if !ok {
 		return e.runner.RunTask(ctx, runID, hostWorkspace, task)
@@ -614,7 +967,7 @@ func (e *Engine) runTaskWithLiveLogs(ctx context.Context, runID, hostWorkspace s
 				mu.Unlock()
 				return
 			}
-			snapshot := latest
+			snapshot := logPrefix + latest
 			dirty = false
 			mu.Unlock()
 

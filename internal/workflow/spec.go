@@ -9,13 +9,19 @@ Workflows are YAML files stored in the configured flows directory (` + "`flows/`
 
 - ` + "`name`" + ` (string, **required**): Non-empty unique workflow identifier.
 - ` + "`cron`" + ` (string, optional): Standard 5-field cron expression or macro (` + "`@hourly`" + `, ` + "`@daily`" + `, ` + "`@weekly`" + `, etc.). Triggers automatically when scheduler is enabled.
+- ` + "`concurrency`" + ` (int, optional, default ` + "`0`" + `): Max concurrent ready tasks executed in parallel within a single run (` + "`0`" + ` = unlimited).
 - ` + "`include`" + ` (list of strings, optional): Relative file or directory paths inside the project/includes directory mounted read-only under ` + "`/includes`" + ` inside every task container. Cannot traverse outside (` + "`..`" + ` rejected).
-- ` + "`tasks`" + ` (list of Task, **required**, at least 1): Execution steps resolved topologically via ` + "`depends_on`" + `.
+- ` + "`tasks`" + ` (list of Task, **required**, at least 1): Execution steps scheduled concurrently once their ` + "`depends_on`" + ` dependencies complete.
 
 ## Task Fields
 
 - ` + "`id`" + ` (string, **required**): Unique within workflow; non-empty; no whitespace, ` + "`/`" + `, ` + "`\\`" + `, ` + "`.`" + `, or ` + "`..`" + `.
-- ` + "`depends_on`" + ` (list of strings, optional): Upstream task IDs that must succeed before this task runs. Graph must be acyclic.
+- ` + "`depends_on`" + ` (list of strings, optional): Upstream task IDs that must complete before this task evaluates/runs. Graph must be acyclic.
+- ` + "`when`" + ` (string, optional, default ` + "`\"on_success\"`" + `): Trigger rule — ` + "`\"on_success\"`" + ` (all ` + "`depends_on`" + ` succeeded, no workflow failure), ` + "`\"on_failure\"`" + ` (runs when a dependency failed, or after workflow failure if ` + "`depends_on`" + ` is empty), or ` + "`\"always\"`" + ` (runs once ` + "`depends_on`" + ` finish regardless of ` + "`SUCCESS`" + `/` + "`FAILED`" + `/` + "`SKIPPED`" + `). Non-matching tasks are marked ` + "`SKIPPED`" + `.
+- ` + "`if`" + ` (string, optional): Conditional expression evaluated against resolved task env (` + "`.env`" + ` + ` + "`task.env`" + ` + per-run ` + "`env`" + `). Supports ` + "`==`" + `, ` + "`!=`" + `, ` + "`&&`" + `, ` + "`||`" + `, ` + "`!`" + `, parentheses, ` + "`${VAR}`" + `/bare env names, quoted strings, and truthy checks (` + "`\"\"`" + `, ` + "`\"0\"`" + `, ` + "`\"false\"`" + `, ` + "`\"no\"`" + `, ` + "`\"off\"`" + ` are false). False conditions mark the task (and downstream ` + "`on_success`" + ` tasks) ` + "`SKIPPED`" + `.
+- ` + "`timeout`" + ` (string, optional): Positive Go duration per attempt (e.g. ` + "`\"30s\"`" + `, ` + "`\"5m\"`" + `). Stops and removes the container on timeout.
+- ` + "`retries`" + ` (int, optional, default ` + "`0`" + `): Number of extra retry attempts after a failure/timeout (` + "`>= 0`" + `).
+- ` + "`retry_delay`" + ` (string, optional): Non-negative Go duration to wait between retry attempts (e.g. ` + "`\"5s\"`" + `).
 
 ### Container Tasks
 - ` + "`runtime`" + ` (string): ` + "`\"python\"`" + `, ` + "`\"js\"`" + `, or ` + "`\"shell\"`" + ` (defaults to ` + "`\"shell\"`" + ` if omitted when ` + "`image`" + ` is set).

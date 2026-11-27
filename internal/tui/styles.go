@@ -99,6 +99,8 @@ func renderStatusBadge(status string) string {
 		return styleKilled.Render("● " + status)
 	case db.StatusRunning:
 		return styleRunning.Render("● " + status)
+	case db.StatusSkipped:
+		return styleMuted.Render("⊘ " + status)
 	default:
 		return styleMuted.Render("○ " + status)
 	}

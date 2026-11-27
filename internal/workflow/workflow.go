@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -17,15 +18,20 @@ const (
 	RuntimeJS      = "js"
 	RuntimeShell   = "shell"
 	RuntimeSubflow = "subflow"
+
+	WhenOnSuccess = "on_success"
+	WhenOnFailure = "on_failure"
+	WhenAlways    = "always"
 )
 
 // Workflow represents a parsed YAML pipeline definition.
 type Workflow struct {
-	Name    string   `yaml:"name"`
-	Cron    string   `yaml:"cron,omitempty"`
-	Include []string `yaml:"include,omitempty"`
-	Tasks   []Task   `yaml:"tasks"`
-	BaseDir string   `yaml:"-"`
+	Name        string   `yaml:"name"`
+	Cron        string   `yaml:"cron,omitempty"`
+	Concurrency int      `yaml:"concurrency,omitempty"`
+	Include     []string `yaml:"include,omitempty"`
+	Tasks       []Task   `yaml:"tasks"`
+	BaseDir     string   `yaml:"-"`
 }
 
 // WorkflowEntry describes a workflow YAML file discovered in a flows directory.
@@ -44,6 +50,11 @@ type Task struct {
 	Image        string            `yaml:"image,omitempty"`
 	Flow         string            `yaml:"flow,omitempty"`
 	Wait         *bool             `yaml:"wait,omitempty"`
+	When         string            `yaml:"when,omitempty"`
+	If           string            `yaml:"if,omitempty"`
+	Timeout      string            `yaml:"timeout,omitempty"`
+	Retries      int               `yaml:"retries,omitempty"`
+	RetryDelay   string            `yaml:"retry_delay,omitempty"`
 	Dependencies []string          `yaml:"dependencies,omitempty"`
 	Include      []string          `yaml:"include,omitempty"`
 	DependsOn    []string          `yaml:"depends_on,omitempty"`
@@ -55,6 +66,39 @@ type Task struct {
 // ShouldWait returns true if a subflow task should block until the child workflow completes.
 func (t Task) ShouldWait() bool {
 	return t.Wait == nil || *t.Wait
+}
+
+// NormalizedWhen returns the effective trigger rule ("on_success", "on_failure", or "always").
+func (t Task) NormalizedWhen() string {
+	w := strings.ToLower(strings.TrimSpace(t.When))
+	if w == "" {
+		return WhenOnSuccess
+	}
+	return w
+}
+
+// TimeoutDuration parses the configured task timeout (0 if unset).
+func (t Task) TimeoutDuration() time.Duration {
+	if strings.TrimSpace(t.Timeout) == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(t.Timeout))
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// RetryDelayDuration parses the configured retry delay (0 if unset).
+func (t Task) RetryDelayDuration() time.Duration {
+	if strings.TrimSpace(t.RetryDelay) == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(t.RetryDelay))
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
 }
 
 // ParseFile reads and validates a workflow YAML file from disk.
@@ -101,6 +145,9 @@ func (w *Workflow) Validate() error {
 			return fmt.Errorf("workflow %q: %w", w.Name, err)
 		}
 	}
+	if w.Concurrency < 0 {
+		return fmt.Errorf("workflow %q concurrency must be >= 0", w.Name)
+	}
 	if len(w.Tasks) == 0 {
 		return fmt.Errorf("workflow %q must define at least one task", w.Name)
 	}
@@ -120,8 +167,35 @@ func (w *Workflow) Validate() error {
 
 		t.Flow = strings.TrimSpace(t.Flow)
 		t.Image = strings.TrimSpace(t.Image)
+		t.When = strings.ToLower(strings.TrimSpace(t.When))
+		t.If = strings.TrimSpace(t.If)
+		t.Timeout = strings.TrimSpace(t.Timeout)
+		t.RetryDelay = strings.TrimSpace(t.RetryDelay)
 		if strings.ContainsAny(t.Image, " \t\r\n") {
 			return fmt.Errorf("task %q image %q must not contain whitespace", t.ID, t.Image)
+		}
+		if t.When != "" && t.When != WhenOnSuccess && t.When != WhenOnFailure && t.When != WhenAlways {
+			return fmt.Errorf("task %q has unsupported when %q (supported: %q, %q, %q)", t.ID, t.When, WhenOnSuccess, WhenOnFailure, WhenAlways)
+		}
+		if t.Retries < 0 {
+			return fmt.Errorf("task %q retries must be >= 0", t.ID)
+		}
+		if t.Timeout != "" {
+			d, err := time.ParseDuration(t.Timeout)
+			if err != nil || d <= 0 {
+				return fmt.Errorf("task %q has invalid timeout %q: must be positive Go duration (e.g. \"30s\", \"5m\")", t.ID, t.Timeout)
+			}
+		}
+		if t.RetryDelay != "" {
+			d, err := time.ParseDuration(t.RetryDelay)
+			if err != nil || d < 0 {
+				return fmt.Errorf("task %q has invalid retry_delay %q: must be non-negative Go duration (e.g. \"5s\", \"1m\")", t.ID, t.RetryDelay)
+			}
+		}
+		if t.If != "" {
+			if err := ValidateCondition(t.If); err != nil {
+				return fmt.Errorf("task %q has invalid if expression: %w", t.ID, err)
+			}
 		}
 
 		if t.Flow != "" {

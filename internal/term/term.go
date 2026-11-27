@@ -90,6 +90,8 @@ func Status(color bool, status string) string {
 		return wrap(color, ansiYellow, status)
 	case "RUNNING":
 		return wrap(color, ansiCyan, status)
+	case "SKIPPED":
+		return wrap(color, ansiDim, status)
 	default:
 		return wrap(color, ansiBold, status)
 	}

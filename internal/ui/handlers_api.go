@@ -877,6 +877,7 @@ func (s *Server) handleAPIValidateFlow(w http.ResponseWriter, r *http.Request) {
 		"valid":       true,
 		"name":        wf.Name,
 		"cron":        wf.Cron,
+		"concurrency": wf.Concurrency,
 		"tasks_count": len(wf.Tasks),
 	})
 }

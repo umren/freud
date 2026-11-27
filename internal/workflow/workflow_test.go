@@ -265,3 +265,83 @@ tasks:
 		t.Fatalf("expected error for missing subflow")
 	}
 }
+
+func TestDAGFieldsAndConditionValidation(t *testing.T) {
+	validYAML := `
+name: advanced-dag
+concurrency: 3
+tasks:
+  - id: a
+    runtime: python
+    timeout: "2m"
+    retries: 2
+    retry_delay: "50ms"
+    if: "(${ENV_NAME} == 'prod' || MODE == 'staging') && !${DRY_RUN}"
+    script: print(1)
+  - id: b
+    runtime: shell
+    image: alpine:3.20
+    depends_on: [a]
+    when: on_failure
+    script: echo fail
+  - id: c
+    runtime: js
+    depends_on: [a]
+    when: always
+    script: console.log(1)
+`
+	wf, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("expected valid advanced DAG, got %v", err)
+	}
+	if wf.Concurrency != 3 || wf.Tasks[0].Retries != 2 || wf.Tasks[1].NormalizedWhen() != WhenOnFailure {
+		t.Fatalf("unexpected parsed fields: %+v", wf)
+	}
+
+	invalidCases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{"negative concurrency", "name: bad\nconcurrency: -1\ntasks:\n  - id: a\n    runtime: python\n    script: print(1)\n", "concurrency"},
+		{"bad when", "name: bad\ntasks:\n  - id: a\n    runtime: python\n    when: maybe\n    script: print(1)\n", "unsupported when"},
+		{"negative retries", "name: bad\ntasks:\n  - id: a\n    runtime: python\n    retries: -1\n    script: print(1)\n", "retries"},
+		{"invalid timeout", "name: bad\ntasks:\n  - id: a\n    runtime: python\n    timeout: 0s\n    script: print(1)\n", "invalid timeout"},
+		{"invalid retry_delay", "name: bad\ntasks:\n  - id: a\n    runtime: python\n    retry_delay: -1s\n    script: print(1)\n", "invalid retry_delay"},
+		{"bad if syntax", "name: bad\ntasks:\n  - id: a\n    runtime: python\n    if: \"'unterminated\"\n    script: print(1)\n", "invalid if expression"},
+		{"bad if op", "name: bad\ntasks:\n  - id: a\n    runtime: python\n    if: \"A ==\"\n    script: print(1)\n", "invalid if expression"},
+	}
+	for _, tc := range invalidCases {
+		if _, err := Parse([]byte(tc.yaml)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: expected error containing %q, got %v", tc.name, tc.want, err)
+		}
+	}
+
+	env := map[string]string{
+		"ENV_NAME": "prod",
+		"MODE":     "dev",
+		"DRY_RUN":  "false",
+		"FLAG":     "1",
+		"OFF":      "no",
+	}
+	condCases := []struct {
+		expr string
+		want bool
+	}{
+		{"", true},
+		{"${ENV_NAME} == 'prod'", true},
+		{"${ENV_NAME} != 'dev'", true},
+		{"MODE == 'prod'", false},
+		{"(${ENV_NAME} == 'prod' || MODE == 'staging') && !${DRY_RUN}", true},
+		{"${MISSING_VAR} == ''", true},
+		{"${FLAG}", true},
+		{"${OFF}", false},
+		{"!${OFF} && !${MISSING_VAR}", true},
+	}
+	for _, tc := range condCases {
+		got, err := EvalCondition(tc.expr, env)
+		if err != nil || got != tc.want {
+			t.Fatalf("EvalCondition(%q) = (%v, %v), want %v", tc.expr, got, err, tc.want)
+		}
+	}
+}

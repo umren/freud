@@ -5,12 +5,12 @@ Freud is a single-binary Go container workflow orchestrator (`CGO_ENABLED=0`) wi
 ## Architecture & Packages
 
 - `main.go` — CLI entrypoint (`run`, `dream`, `tui`, `mcp`, `cache ls|clear`).
-- `internal/workflow/` — YAML parser, validator, cycle detector, topological sort (`Workflow`, `Task`, canonical `SpecMarkdown`).
+- `internal/workflow/` — YAML parser, validator, cycle detector, topological sort, `if:` condition evaluator, canonical `SpecMarkdown` (`Workflow`, `Task`).
 - `internal/cron/` — 5-field cron & macro parser.
 - `internal/env/` — `.env` loader, per-run env validation & merging (`LoadDefault`, `ParseFile`, `ValidateEnvMap`, `MergeRunEnv`, `SortedKeys`). **Values are never logged or exposed via API/MCP.**
 - `internal/db/` — Unified store supporting **SQLite**, **PostgreSQL**, and **MySQL/MariaDB** (`runs`, `task_runs`, `users`, `sessions`, `api_tokens`, `audit_logs`, `settings`).
 - `internal/runner/` — Docker SDK execution & `orchestrator-cache:*` dependency layer caching.
-- `internal/engine/` — Pipeline execution engine, subflows (`flow:`), workspace management, kill propagation, `TriggeredBy` context.
+- `internal/engine/` — Parallel DAG execution engine (`concurrency`, `timeout`, `retries`, `when`, `if`, subflows `flow:`), workspace management, kill propagation, `TriggeredBy` / `WithRunEnv` context.
 - `internal/service/` — Shared DTOs, pagination helpers, path-safe include/flow read & atomic `agent_madness` write/delete helpers, and log tailing (`ApplyTailLines`).
 - `internal/syncer/` — `os/exec git` repository sync (`flows_path`, `includes_path`, `prune`) + GitHub/Gitea/GitLab webhook verification.
 - `internal/maintenance/` — Age-based cleanup for runs/task_runs, `workspaces/<run_id>`, audit logs, expired sessions, and Docker cache.

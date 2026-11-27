@@ -228,12 +228,17 @@ vacuum_sqlite = false
 ```yaml
 name: my-pipeline
 cron: "0 */6 * * *"           # optional 5-field cron expression (or @hourly, @daily, etc.)
+concurrency: 4                # optional max parallel tasks per run (0 = unlimited)
 include:                      # optional workflow-wide read-only files/dirs mounted under /includes
   - includes/shared.py
 tasks:
   - id: step_one
     runtime: python           # "python", "js", or "shell" (optional if image is set)
     image: python:3.13-slim   # optional Docker image override
+    timeout: "5m"             # optional per-attempt timeout (Go duration)
+    retries: 2                # optional retry attempts after failure/timeout
+    retry_delay: "10s"        # optional wait between retries
+    if: "${ENV_NAME} != 'off'"# optional condition (supports ==, !=, &&, ||, !, ())
     dependencies:             # optional packages installed & cached via orchestrator-cache:*
       - pydantic
       - pyyaml
@@ -271,6 +276,12 @@ tasks:
       - step_three
     env:
       PIPELINE_ENV: "prod"
+
+  - id: notify_failure
+    when: on_failure          # "on_success" (default), "on_failure", or "always"
+    image: alpine:3.20
+    script: |
+      echo "Pipeline failed — run cleanup or send alert"
 ```
 
 ### Included Files (`/includes`)
@@ -280,12 +291,15 @@ tasks:
 - **Python imports**: `PYTHONPATH=/workspace:/includes` is set automatically for `python` tasks (unless overridden in `env:`), allowing direct `import <module>` from `/includes`.
 - **Path mapping**: paths under `includes/...` map to `/includes/...` (e.g. `includes/math_utils.ts` → `/includes/math_utils.ts`); other relative paths map to `/includes/<path>`.
 
-### Validation Rules
+### Validation Rules & DAG Semantics
 
-- `name` must be non-empty.
+- `name` must be non-empty; `concurrency` must be `>= 0` (`0` = unlimited parallel ready tasks).
 - `tasks` must contain at least one task.
 - Each task `id` must be unique, non-empty, and must not contain whitespace, `/`, `\`, `.` or `..`.
 - `runtime` must be `"python"`, `"js"`, or `"shell"` (or `"subflow"` / `flow:`; if omitted and `image` is set, `runtime` defaults to `"shell"`).
+- `when` must be empty / `"on_success"` (default), `"on_failure"`, or `"always"`. If `when: on_failure` has no `depends_on`, it runs after all regular tasks complete iff any task failed.
+- `if` expressions are syntax-checked at parse time and evaluated against resolved task env (`.env` + `task.env` + per-run `env`); false conditions skip the task (`SKIPPED`) and downstream `on_success` tasks.
+- `timeout` must be a positive Go duration (`> 0`), `retries` `>= 0`, `retry_delay` `>= 0`.
 - `image` is optional for `python` and `js`, required for `shell`, and must not contain whitespace.
 - `dependencies` is optional for `python` and `js` (not supported on `shell`); entries must be non-empty.
 - `include` paths must be relative and stay inside the workflow directory (no `..` traversal).
@@ -297,8 +311,8 @@ tasks:
 ## How Execution Works
 
 1. **Workspace setup**: generates a unique `run_id` (`YYYYMMDD-HHMMSS-<hex>`) and creates `./workspaces/<run_id>/.scripts` on the host.
-2. **Topological ordering**: resolves task order via Kahn's algorithm so every dependency completes before dependents start.
-3. **Dependency caching (when `dependencies` is non-empty)**: computes a SHA-256 content hash over `(base_image, runtime, sorted(dependencies))`, checks for an existing `orchestrator-cache:<hash>` image, and builds one once if missing.
+2. **Parallel DAG Scheduling**: validates acyclicity via Kahn's algorithm and executes all ready tasks (`inDegree == 0`) concurrently in goroutines (bounded by `concurrency` if set). Evaluates `when` trigger rules (`on_success` / `on_failure` / `always`), `if:` conditions, `timeout` per attempt, and `retries` / `retry_delay`.
+3. **Dependency caching (when `dependencies` is non-empty)**: computes a SHA-256 content hash over `(base_image, runtime, sorted(dependencies))`, checks for an existing `orchestrator-cache:<hash>` image, and builds one once if missing (serialized safely for concurrent tasks).
 4. **Container execution**:
    - Writes the task script to `./workspaces/<run_id>/.scripts/<task_id>.py` (`python`), `.ts` (`js`), or `.sh` (`shell`).
    - Mounts `./workspaces/<run_id>` at `/workspace` (`WorkingDir: /workspace`) and mounts `/includes` read-only.

@@ -567,6 +567,7 @@ func (s *Server) toolValidateFlow(_ context.Context, raw json.RawMessage) (any, 
 		"valid":       true,
 		"name":        wf.Name,
 		"cron":        wf.Cron,
+		"concurrency": wf.Concurrency,
 		"tasks_count": len(wf.Tasks),
 	}, nil
 }

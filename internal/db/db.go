@@ -29,6 +29,7 @@ const (
 	StatusSuccess = "SUCCESS"
 	StatusFailed  = "FAILED"
 	StatusKilled  = "KILLED"
+	StatusSkipped = "SKIPPED"
 )
 
 // DetectDialect determines the database backend from a file path or DSN.

@@ -25,13 +25,14 @@ var (
 
 // FlowSummary is the shared DTO for flow listings in REST API and MCP.
 type FlowSummary struct {
-	File       string     `json:"file"`
-	Name       string     `json:"name,omitempty"`
-	Cron       string     `json:"cron,omitempty"`
-	NextRun    string     `json:"next_run,omitempty"`
-	TasksCount int        `json:"tasks_count"`
-	ParseError string     `json:"parse_error,omitempty"`
-	LastRun    *Execution `json:"last_run,omitempty"`
+	File        string     `json:"file"`
+	Name        string     `json:"name,omitempty"`
+	Cron        string     `json:"cron,omitempty"`
+	Concurrency int        `json:"concurrency,omitempty"`
+	NextRun     string     `json:"next_run,omitempty"`
+	TasksCount  int        `json:"tasks_count"`
+	ParseError  string     `json:"parse_error,omitempty"`
+	LastRun     *Execution `json:"last_run,omitempty"`
 }
 
 // FlowTask describes a parsed task node inside a workflow definition.
@@ -41,19 +42,25 @@ type FlowTask struct {
 	Image        string   `json:"image,omitempty"`
 	Flow         string   `json:"flow,omitempty"`
 	Wait         *bool    `json:"wait,omitempty"`
+	When         string   `json:"when,omitempty"`
+	If           string   `json:"if,omitempty"`
+	Timeout      string   `json:"timeout,omitempty"`
+	Retries      int      `json:"retries,omitempty"`
+	RetryDelay   string   `json:"retry_delay,omitempty"`
 	DependsOn    []string `json:"depends_on,omitempty"`
 	Dependencies []string `json:"dependencies,omitempty"`
 }
 
 // FlowDetail is the shared DTO for single-flow inspection in REST API and MCP.
 type FlowDetail struct {
-	File       string      `json:"file"`
-	Name       string      `json:"name"`
-	Cron       string      `json:"cron,omitempty"`
-	NextRun    string      `json:"next_run,omitempty"`
-	Tasks      []FlowTask  `json:"tasks"`
-	RawYAML    string      `json:"raw_yaml"`
-	RecentRuns []Execution `json:"recent_runs"`
+	File        string      `json:"file"`
+	Name        string      `json:"name"`
+	Cron        string      `json:"cron,omitempty"`
+	Concurrency int         `json:"concurrency,omitempty"`
+	NextRun     string      `json:"next_run,omitempty"`
+	Tasks       []FlowTask  `json:"tasks"`
+	RawYAML     string      `json:"raw_yaml"`
+	RecentRuns  []Execution `json:"recent_runs"`
 }
 
 // Execution is the shared DTO for workflow run metadata across REST API and MCP.
@@ -208,6 +215,7 @@ func ListFlows(ctx context.Context, store *db.Store, flowsDir string) ([]FlowSum
 		wf := e.Workflow
 		item.Name = wf.Name
 		item.Cron = wf.Cron
+		item.Concurrency = wf.Concurrency
 		item.TasksCount = len(wf.Tasks)
 		item.NextRun = nextCronUTC(wf.Cron, now)
 		if last, ok := latestRuns[wf.Name]; ok {
@@ -238,6 +246,11 @@ func GetFlowDetail(ctx context.Context, store *db.Store, flowsDir, target string
 			Image:        t.Image,
 			Flow:         t.Flow,
 			Wait:         t.Wait,
+			When:         t.When,
+			If:           t.If,
+			Timeout:      t.Timeout,
+			Retries:      t.Retries,
+			RetryDelay:   t.RetryDelay,
 			DependsOn:    t.DependsOn,
 			Dependencies: t.Dependencies,
 		})
@@ -248,13 +261,14 @@ func GetFlowDetail(ctx context.Context, store *db.Store, flowsDir, target string
 	}
 
 	return &FlowDetail{
-		File:       matched.FileName,
-		Name:       matched.Workflow.Name,
-		Cron:       matched.Workflow.Cron,
-		NextRun:    nextCronUTC(matched.Workflow.Cron, time.Now()),
-		Tasks:      tasks,
-		RawYAML:    matched.RawYAML,
-		RecentRuns: recent,
+		File:        matched.FileName,
+		Name:        matched.Workflow.Name,
+		Cron:        matched.Workflow.Cron,
+		Concurrency: matched.Workflow.Concurrency,
+		NextRun:     nextCronUTC(matched.Workflow.Cron, time.Now()),
+		Tasks:       tasks,
+		RawYAML:     matched.RawYAML,
+		RecentRuns:  recent,
 	}, nil
 }
 

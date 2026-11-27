@@ -352,6 +352,7 @@ tbody tr:hover { background: var(--hover-row); }
 .badge-failed  { background: var(--failed-soft);  color: var(--failed-text);  border-color: rgba(239, 68, 68, 0.3); }
 .badge-running { background: var(--running-soft); color: var(--running-text); border-color: rgba(56, 189, 248, 0.3); }
 .badge-killed  { background: var(--killed-soft);  color: var(--killed-text);  border-color: rgba(245, 158, 11, 0.35); }
+.badge-skipped { background: var(--surface-2);    color: var(--muted);        border: 1px dashed var(--border); }
 .badge-neutral { background: var(--surface-2);    color: var(--muted);        border-color: var(--border); }
 .badge-accent  { background: var(--accent-soft);  color: var(--accent-text);  border-color: var(--accent-border); }
 
@@ -530,6 +531,7 @@ tbody tr:hover { background: var(--hover-row); }
 .dag-node.failed rect  { stroke: var(--failed);  fill: var(--failed-soft); }
 .dag-node.running rect { stroke: var(--running); fill: var(--running-soft); }
 .dag-node.killed rect  { stroke: var(--killed);  fill: var(--killed-soft); }
+.dag-node.skipped rect { stroke: var(--muted);   stroke-dasharray: 4 3; opacity: 0.72; }
 .dag-node.pending rect { stroke: var(--muted);   opacity: 0.7; }
 
 .dag-edge {
@@ -570,6 +572,7 @@ tbody tr:hover { background: var(--hover-row); }
 .gantt-bar.failed  { background: var(--failed); }
 .gantt-bar.running { background: var(--running); }
 .gantt-bar.killed  { background: var(--killed); }
+.gantt-bar.skipped { background: repeating-linear-gradient(45deg, var(--border), var(--border) 4px, transparent 4px, transparent 8px); }
 
 .split-layout {
   display: grid;

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -618,5 +619,263 @@ tasks:
 	cEnv := mr.capturedEnvs["child_step"]
 	if cEnv["TARGET_DATE"] != "2026-11-20" || cEnv["CHILD_EXP"] != "d=2026-11-20" || cEnv["EXTRA"] != "one-off" {
 		t.Fatalf("unexpected child subflow task env: %+v", cEnv)
+	}
+}
+
+type advancedMockRunner struct {
+	mu          sync.Mutex
+	inFlight    int
+	peak        int
+	delay       time.Duration
+	failUntil   map[string]int // taskID -> fail for first N attempts (negative = always fail)
+	blockTasks  map[string]bool
+	attempts    map[string]int
+	executed    []string
+	bothEntered chan struct{}
+	barrierNeed int
+	barrierSeen int
+}
+
+func (m *advancedMockRunner) RunTask(ctx context.Context, _ string, _ string, task workflow.Task) (*runner.Result, error) {
+	m.mu.Lock()
+	if m.attempts == nil {
+		m.attempts = make(map[string]int)
+	}
+	m.attempts[task.ID]++
+	attempt := m.attempts[task.ID]
+	m.executed = append(m.executed, task.ID)
+	m.inFlight++
+	if m.inFlight > m.peak {
+		m.peak = m.inFlight
+	}
+	shouldBarrier := m.bothEntered != nil && m.barrierNeed > 0 && task.ID != "root" && task.ID != "join"
+	if shouldBarrier {
+		m.barrierSeen++
+		if m.barrierSeen == m.barrierNeed {
+			close(m.bothEntered)
+		}
+	}
+	delay := m.delay
+	block := m.blockTasks[task.ID]
+	failRule := m.failUntil[task.ID]
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		m.inFlight--
+		m.mu.Unlock()
+	}()
+
+	if shouldBarrier {
+		select {
+		case <-m.bothEntered:
+		case <-ctx.Done():
+			return &runner.Result{ExitCode: -1, Logs: "canceled"}, ctx.Err()
+		case <-time.After(2 * time.Second):
+			return &runner.Result{ExitCode: 1, Logs: "parallel barrier timeout"}, nil
+		}
+	}
+	if block {
+		<-ctx.Done()
+		return &runner.Result{ExitCode: -1, Logs: "blocked until canceled"}, ctx.Err()
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return &runner.Result{ExitCode: -1}, ctx.Err()
+		}
+	}
+
+	if failRule < 0 || attempt <= failRule {
+		return &runner.Result{ExitCode: 2, Logs: fmt.Sprintf("attempt %d failed\n", attempt)}, nil
+	}
+	return &runner.Result{ExitCode: 0, Logs: fmt.Sprintf("attempt %d ok\n", attempt)}, nil
+}
+
+func TestEngineParallelDAGAndConcurrency(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tmpDir, "parallel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// 1. Unlimited concurrency proves b1 & b2 execute simultaneously.
+	mr := &advancedMockRunner{
+		bothEntered: make(chan struct{}),
+		barrierNeed: 2,
+	}
+	eng := New(store, mr, filepath.Join(tmpDir, "ws"))
+	eng.SetOutput(io.Discard, io.Discard)
+
+	wf := &workflow.Workflow{
+		Name: "diamond",
+		Tasks: []workflow.Task{
+			{ID: "root", Runtime: workflow.RuntimePython, Script: "print('root')"},
+			{ID: "b1", Runtime: workflow.RuntimePython, DependsOn: []string{"root"}, Script: "print('b1')"},
+			{ID: "b2", Runtime: workflow.RuntimePython, DependsOn: []string{"root"}, Script: "print('b2')"},
+			{ID: "join", Runtime: workflow.RuntimeJS, DependsOn: []string{"b1", "b2"}, Script: "console.log('join')"},
+		},
+	}
+	if _, err := eng.Run(context.Background(), wf); err != nil {
+		t.Fatalf("parallel diamond run failed: %v", err)
+	}
+	if mr.peak < 2 || mr.executed[0] != "root" || mr.executed[len(mr.executed)-1] != "join" {
+		t.Fatalf("expected root first, parallel peak>=2, join last; got peak=%d order=%v", mr.peak, mr.executed)
+	}
+
+	// 2. Bounded concurrency=2 caps peak concurrency on 4 parallel branches.
+	mr2 := &advancedMockRunner{delay: 30 * time.Millisecond}
+	eng2 := New(store, mr2, filepath.Join(tmpDir, "ws2"))
+	eng2.SetOutput(io.Discard, io.Discard)
+	boundedWF := &workflow.Workflow{
+		Name:        "bounded",
+		Concurrency: 2,
+		Tasks: []workflow.Task{
+			{ID: "p1", Runtime: workflow.RuntimePython, Script: "print(1)"},
+			{ID: "p2", Runtime: workflow.RuntimePython, Script: "print(2)"},
+			{ID: "p3", Runtime: workflow.RuntimePython, Script: "print(3)"},
+			{ID: "p4", Runtime: workflow.RuntimePython, Script: "print(4)"},
+		},
+	}
+	if _, err := eng2.Run(context.Background(), boundedWF); err != nil {
+		t.Fatalf("bounded run failed: %v", err)
+	}
+	if mr2.peak > 2 {
+		t.Fatalf("expected concurrency <= 2, got peak=%d", mr2.peak)
+	}
+}
+
+func TestEngineTaskTimeoutAndRetries(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tmpDir, "retries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// 1. Flaky task fails twice then succeeds on 3rd attempt.
+	mr := &advancedMockRunner{failUntil: map[string]int{"flaky": 2}}
+	eng := New(store, mr, filepath.Join(tmpDir, "ws"))
+	eng.SetOutput(io.Discard, io.Discard)
+
+	wf := &workflow.Workflow{
+		Name: "retry-ok",
+		Tasks: []workflow.Task{
+			{ID: "flaky", Runtime: workflow.RuntimePython, Retries: 2, RetryDelay: "5ms", Script: "print(1)"},
+		},
+	}
+	runID, err := eng.Run(context.Background(), wf)
+	if err != nil {
+		t.Fatalf("expected flaky task with retries=2 to succeed, got %v", err)
+	}
+	tasks, err := store.ListTaskRuns(context.Background(), runID)
+	if err != nil || len(tasks) != 1 || tasks[0].Status != db.StatusSuccess {
+		t.Fatalf("unexpected task record: %+v err=%v", tasks, err)
+	}
+	if !strings.Contains(tasks[0].Logs.String, "Retry attempt 2/3") || !strings.Contains(tasks[0].Logs.String, "Retry attempt 3/3") {
+		t.Fatalf("expected retry headers in logs, got:\n%s", tasks[0].Logs.String)
+	}
+
+	// 2. Timeout fails cleanly after retry exhaustion.
+	mrTO := &advancedMockRunner{blockTasks: map[string]bool{"hang": true}}
+	engTO := New(store, mrTO, filepath.Join(tmpDir, "ws2"))
+	engTO.SetOutput(io.Discard, io.Discard)
+	wfTO := &workflow.Workflow{
+		Name: "timeout-fail",
+		Tasks: []workflow.Task{
+			{ID: "hang", Runtime: workflow.RuntimePython, Timeout: "25ms", Retries: 1, Script: "import time; time.sleep(10)"},
+		},
+	}
+	runTO, err := engTO.Run(context.Background(), wfTO)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+	if mrTO.attempts["hang"] != 2 {
+		t.Fatalf("expected 2 attempts before failing, got %d", mrTO.attempts["hang"])
+	}
+	toTasks, _ := store.ListTaskRuns(context.Background(), runTO)
+	if len(toTasks) != 1 || toTasks[0].Status != db.StatusFailed || !strings.Contains(toTasks[0].Logs.String, "timed out") {
+		t.Fatalf("unexpected timed out task record: %+v", toTasks)
+	}
+}
+
+func TestEngineWhenAndIfConditionalBranching(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := db.Open(filepath.Join(tmpDir, "cond.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// 1. Success workflow: false `if:` skips task + downstream on_success, `when: always` still runs, `when: on_failure` is skipped.
+	mr := &advancedMockRunner{}
+	eng := New(store, mr, filepath.Join(tmpDir, "ws1"))
+	eng.SetOutput(io.Discard, io.Discard)
+
+	wfOK := &workflow.Workflow{
+		Name: "cond-success",
+		Tasks: []workflow.Task{
+			{ID: "main", Runtime: workflow.RuntimePython, Script: "print(1)"},
+			{ID: "opt", Runtime: workflow.RuntimePython, DependsOn: []string{"main"}, If: "${RUN_OPT} == 'yes'", Script: "print(2)"},
+			{ID: "after_opt", Runtime: workflow.RuntimePython, DependsOn: []string{"opt"}, Script: "print(3)"},
+			{ID: "cleanup_always", Runtime: workflow.RuntimePython, DependsOn: []string{"opt"}, When: workflow.WhenAlways, Script: "print(4)"},
+			{ID: "global_fail", Runtime: workflow.RuntimePython, When: workflow.WhenOnFailure, Script: "print(5)"},
+		},
+	}
+	runID1, err := eng.Run(WithRunEnv(context.Background(), map[string]string{"RUN_OPT": "no"}), wfOK)
+	if err != nil {
+		t.Fatalf("cond-success failed: %v", err)
+	}
+	recs1, _ := store.ListTaskRuns(context.Background(), runID1)
+	byID1 := make(map[string]db.TaskRunRecord, len(recs1))
+	for _, r := range recs1 {
+		byID1[r.TaskID] = r
+	}
+	if byID1["main"].Status != db.StatusSuccess ||
+		byID1["opt"].Status != db.StatusSkipped ||
+		byID1["after_opt"].Status != db.StatusSkipped ||
+		byID1["cleanup_always"].Status != db.StatusSuccess ||
+		byID1["global_fail"].Status != db.StatusSkipped {
+		t.Fatalf("unexpected statuses in cond-success: %+v", byID1)
+	}
+
+	// 2. Failing workflow triggers both dependency-scoped and global `when: on_failure` + `when: always`, while run remains FAILED.
+	mrFail := &advancedMockRunner{failUntil: map[string]int{"boom": -1}}
+	engFail := New(store, mrFail, filepath.Join(tmpDir, "ws2"))
+	engFail.SetOutput(io.Discard, io.Discard)
+
+	wfFail := &workflow.Workflow{
+		Name: "cond-failure",
+		Tasks: []workflow.Task{
+			{ID: "boom", Runtime: workflow.RuntimePython, Script: "exit(2)"},
+			{ID: "skipped_downstream", Runtime: workflow.RuntimePython, DependsOn: []string{"boom"}, Script: "print(1)"},
+			{ID: "branch_recover", Runtime: workflow.RuntimePython, DependsOn: []string{"boom"}, When: workflow.WhenOnFailure, Script: "print(2)"},
+			{ID: "always_after_boom", Runtime: workflow.RuntimePython, DependsOn: []string{"boom"}, When: workflow.WhenAlways, Script: "print(3)"},
+			{ID: "global_alert", Runtime: workflow.RuntimePython, When: workflow.WhenOnFailure, Script: "print(4)"},
+		},
+	}
+	runID2, err := engFail.Run(context.Background(), wfFail)
+	if err == nil {
+		t.Fatalf("expected cond-failure run to return error")
+	}
+	runRec2, _ := store.GetRun(context.Background(), runID2)
+	if runRec2.Status != db.StatusFailed {
+		t.Fatalf("expected FAILED workflow status, got %s", runRec2.Status)
+	}
+	recs2, _ := store.ListTaskRuns(context.Background(), runID2)
+	byID2 := make(map[string]db.TaskRunRecord, len(recs2))
+	for _, r := range recs2 {
+		byID2[r.TaskID] = r
+	}
+	if byID2["boom"].Status != db.StatusFailed ||
+		byID2["branch_recover"].Status != db.StatusSuccess ||
+		byID2["always_after_boom"].Status != db.StatusSuccess ||
+		byID2["global_alert"].Status != db.StatusSuccess {
+		t.Fatalf("unexpected task statuses in cond-failure: %+v", byID2)
+	}
+	if _, executedDownstream := byID2["skipped_downstream"]; executedDownstream {
+		t.Fatalf("downstream on_success task should not execute after upstream failure")
 	}
 }

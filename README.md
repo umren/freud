@@ -10,18 +10,20 @@ A lightweight, **single-binary Go workflow orchestrator** that runs YAML DAG pip
 
 Most existing workflow orchestrators fall into one of two camps:
 
-- **Python-centric tools (Airflow, Prefect, Dagster)** lock you into a Python runtime and come with heavy multi-service setups, worker queues, and dependency juggling.
+- **Python-centric tools (Airflow, Prefect, Dagster)** lock you into the host Python runtime and struggle when pipelines need **different Python versions** or **conflicting dependency sets** — forcing brittle virtualenvs, heavy multi-service setups, and constant dependency juggling.
 - **More feature-rich platforms (like Kestra)** run on a heavy **JVM** stack and increasingly focus on **enterprise clients**, gated features, and commercial tiers.
 
-**Freud** is built to be the opposite:
+**Freud** takes a simpler, cleaner approach:
 
-- **Single lightweight Go binary** — starts in milliseconds, needs only Docker, and fits comfortably on a small VPS or laptop.
-- **Language-agnostic by default** — mix `python`, `js` (`Bun`/`Node`), or any custom `Docker` image in the same DAG without runtime lock-in.
+- **Isolated versions & dependencies — solved** — every task runs in its own Docker image (`python:3.10`, `python:3.13-slim`, `oven/bun`, custom images, etc.) with per-task cached dependencies (`orchestrator-cache:*`). Different Python versions and conflicting libraries coexist in the same DAG effortlessly.
+- **A "clean" core with zero compatibility friction** — the orchestrator itself is a pure-Go binary that doesn't bundle your runtime libraries or cloud SDKs. Because it sits strictly outside your task containers, your code and SDKs will never clash with the orchestrator.
+- **Port any existing code in 5 minutes (even via an AI agent)** — no proprietary `@task` decorators or SDK rewrites. Wrap your existing Python/JS/Shell scripts and shared modules cleanly into YAML (any AI agent can do this in ~5 minutes using [`AGENTS.md`](AGENTS.md) or MCP) and immediately rely on a ready, flexible orchestrator.
 - **100% Open Source forever** — licensed under **MIT**, with every feature (Web UI, TUI, Cron, RBAC/Auth, Git Sync, Retention, REST API, and MCP server) available to everyone with **no paid tiers or enterprise paywalls**.
 
 ## ✨ Highlights
 
 - 🪶 **Single binary (`CGO_ENABLED=0`)** — zero external runtime dependencies except Docker; SQLite works out of the box (PostgreSQL & MySQL/MariaDB also built in).
+- ⚡ **Parallel & resilient DAGs** — run independent branches concurrently (`concurrency` limit), configure `timeout` & `retries`, branch with `if:` expressions, and handle failures with `when: on_failure` / `always`.
 - 🐳 **Polyglot Docker tasks** — run `python`, `js` (`bun`/`node`), or any custom `shell` image with automatic dependency layer caching (`orchestrator-cache:*`).
 - 📁 **Shared workspace & `/includes`** — steps share `/workspace` during a run and mount helper scripts read-only at `/includes` with zero copying.
 - 🖥️ **Dream Web UI + TUI** — inspect DAG topology, stream live task logs, manage users/audit logs, clean up old data, and trigger runs (even with one-off per-run `env` parameters).
